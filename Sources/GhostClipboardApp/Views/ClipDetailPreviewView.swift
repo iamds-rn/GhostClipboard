@@ -30,7 +30,7 @@ public struct ClipDetailPreviewView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     if clip.isSensitiveOrEphemeral {
                         sensitivePreviewCard
-                        if isRevealed, let jwt = coordinator.actionsEngine.decodeJWT(clip.content, now: now) {
+                        if let jwt = coordinator.actionsEngine.decodeJWT(clip.content, now: now) {
                             jwtInspectorCard(jwt)
                         }
                     } else {

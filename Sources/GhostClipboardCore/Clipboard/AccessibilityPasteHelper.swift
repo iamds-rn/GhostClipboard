@@ -31,7 +31,7 @@ public enum AccessibilityPasteHelper {
     @discardableResult
     public static func synthesizeCommandVPaste() -> Bool {
         guard isAccessibilityTrusted else { return false }
-        guard let source = CGEventSource(stateID: .combinedSessionState) else { return false }
+        let source = CGEventSource(stateID: .combinedSessionState)
 
         let vKeyCode: CGKeyCode = 0x09 // kVK_ANSI_V
         guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: vKeyCode, keyDown: true),
@@ -124,6 +124,19 @@ public enum ShortcutFormatter {
         )
     ]
 
+    public static func isModifierOnlyKeyCode(_ keyCode: UInt32) -> Bool {
+        switch Int(keyCode) {
+        case kVK_Command, kVK_RightCommand,
+             kVK_Shift, kVK_RightShift,
+             kVK_Option, kVK_RightOption,
+             kVK_Control, kVK_RightControl,
+             kVK_CapsLock, kVK_Function:
+            return true
+        default:
+            return false
+        }
+    }
+
     public static func carbonModifiers(from flags: NSEvent.ModifierFlags) -> UInt32 {
         var mods: UInt32 = 0
         if flags.contains(.control) { mods |= carbonControlKey }
@@ -146,10 +159,39 @@ public enum ShortcutFormatter {
     public static func keyName(for keyCode: UInt32) -> String {
         switch Int(keyCode) {
         case kVK_Space: return "Space"
-        case kVK_Return: return "↩"
+        case kVK_Return, kVK_ANSI_KeypadEnter: return "↩"
         case kVK_Tab: return "⇥"
         case kVK_Delete: return "⌫"
+        case kVK_ForwardDelete: return "⌦"
         case kVK_Escape: return "⎋"
+        case kVK_LeftArrow: return "←"
+        case kVK_RightArrow: return "→"
+        case kVK_UpArrow: return "↑"
+        case kVK_DownArrow: return "↓"
+        case kVK_Home: return "↖"
+        case kVK_End: return "↘"
+        case kVK_PageUp: return "⇞"
+        case kVK_PageDown: return "⇟"
+        case kVK_F1: return "F1"
+        case kVK_F2: return "F2"
+        case kVK_F3: return "F3"
+        case kVK_F4: return "F4"
+        case kVK_F5: return "F5"
+        case kVK_F6: return "F6"
+        case kVK_F7: return "F7"
+        case kVK_F8: return "F8"
+        case kVK_F9: return "F9"
+        case kVK_F10: return "F10"
+        case kVK_F11: return "F11"
+        case kVK_F12: return "F12"
+        case kVK_F13: return "F13"
+        case kVK_F14: return "F14"
+        case kVK_F15: return "F15"
+        case kVK_F16: return "F16"
+        case kVK_F17: return "F17"
+        case kVK_F18: return "F18"
+        case kVK_F19: return "F19"
+        case kVK_F20: return "F20"
         case kVK_ANSI_A: return "A"
         case kVK_ANSI_B: return "B"
         case kVK_ANSI_C: return "C"

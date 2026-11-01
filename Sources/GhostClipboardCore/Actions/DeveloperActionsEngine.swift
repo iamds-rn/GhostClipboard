@@ -694,11 +694,19 @@ public final class DeveloperActionsEngine: Sendable {
 
     public func decodeJWT(_ text: String, now: Date = Date()) -> DecodedJWT? {
         var cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if (cleaned.hasPrefix("\"") && cleaned.hasSuffix("\"")) ||
+           (cleaned.hasPrefix("'") && cleaned.hasSuffix("'")) {
+            cleaned = String(cleaned.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         if cleaned.lowercased().hasPrefix("authorization:") {
             cleaned = String(cleaned.dropFirst("authorization:".count)).trimmingCharacters(in: .whitespaces)
         }
         if cleaned.lowercased().hasPrefix("bearer ") {
             cleaned = String(cleaned.dropFirst("bearer ".count)).trimmingCharacters(in: .whitespaces)
+        }
+        if (cleaned.hasPrefix("\"") && cleaned.hasSuffix("\"")) ||
+           (cleaned.hasPrefix("'") && cleaned.hasSuffix("'")) {
+            cleaned = String(cleaned.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
         let parts = cleaned.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
@@ -795,6 +803,13 @@ public final class DeveloperActionsEngine: Sendable {
         var body: String?
     }
 
+    private static let curlOptionsTakingValue: Set<String> = [
+        "-o", "--output", "-A", "--user-agent", "-u", "--user",
+        "-b", "--cookie", "-c", "--cookie-jar", "-e", "--referer",
+        "--connect-timeout", "-m", "--max-time", "-F", "--form",
+        "-x", "--proxy", "-w", "--write-out", "--cacert", "--cert", "--key"
+    ]
+
     private func parseCurlCommand(_ text: String) -> ParsedCurlCommand? {
         let normalized = text
             .replacingOccurrences(of: "\\\r\n", with: " ")
@@ -812,7 +827,7 @@ public final class DeveloperActionsEngine: Sendable {
         var url: String? = nil
         var explicitMethod: String? = nil
         var headers: [(String, String)] = []
-        var body: String? = nil
+        var bodyParts: [String] = []
 
         var i = 1
         while i < tokens.count {
@@ -821,6 +836,19 @@ public final class DeveloperActionsEngine: Sendable {
             case "-X", "--request":
                 if i + 1 < tokens.count {
                     explicitMethod = tokens[i + 1].uppercased()
+                    i += 2
+                    continue
+                }
+            case "--url":
+                if i + 1 < tokens.count {
+                    let rawURL = tokens[i + 1]
+                    if rawURL.hasPrefix("http://") || rawURL.hasPrefix("https://") {
+                        url = rawURL
+                    } else if rawURL.hasPrefix("localhost") || rawURL.hasPrefix("127.0.0.1") {
+                        url = "http://" + rawURL
+                    } else {
+                        url = "https://" + rawURL
+                    }
                     i += 2
                     continue
                 }
@@ -835,25 +863,35 @@ public final class DeveloperActionsEngine: Sendable {
                     i += 2
                     continue
                 }
-            case "-d", "--data", "--data-raw", "--data-binary":
+            case "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode":
                 if i + 1 < tokens.count {
-                    body = tokens[i + 1]
+                    bodyParts.append(tokens[i + 1])
                     i += 2
                     continue
                 }
             default:
-                if token.hasPrefix("http://") || token.hasPrefix("https://") {
+                if token.hasPrefix("-X") && token.count > 2 {
+                    explicitMethod = String(token.dropFirst(2)).uppercased()
+                } else if Self.curlOptionsTakingValue.contains(token) {
+                    i += 2
+                    continue
+                } else if token.hasPrefix("http://") || token.hasPrefix("https://") {
                     url = token
-                } else if !token.hasPrefix("-") && url == nil && token.contains(".") {
-                    url = "https://" + token
+                } else if !token.hasPrefix("-") && url == nil {
+                    if token.hasPrefix("localhost") || token.hasPrefix("127.0.0.1") {
+                        url = "http://" + token
+                    } else if token.contains(".") {
+                        url = "https://" + token
+                    }
                 }
             }
             i += 1
         }
 
         guard let resolvedURL = url else { return nil }
-        let resolvedMethod = explicitMethod ?? (body != nil ? "POST" : "GET")
-        return ParsedCurlCommand(url: resolvedURL, method: resolvedMethod, headers: headers, body: body)
+        let combinedBody = bodyParts.isEmpty ? nil : bodyParts.joined(separator: "&")
+        let resolvedMethod = explicitMethod ?? (combinedBody != nil ? "POST" : "GET")
+        return ParsedCurlCommand(url: resolvedURL, method: resolvedMethod, headers: headers, body: combinedBody)
     }
 
     public func convertCurlToJSFetch(_ text: String) -> String? {
@@ -894,7 +932,11 @@ public final class DeveloperActionsEngine: Sendable {
         }
 
         if let body = parsed.body {
-            lines.append("request.httpBody = #\"\(body)\"#.data(using: .utf8)")
+            if body.contains("\"#") {
+                lines.append("request.httpBody = \"\(escapeDoubleQuotes(body))\".data(using: .utf8)")
+            } else {
+                lines.append("request.httpBody = #\"\(body)\"#.data(using: .utf8)")
+            }
         }
 
         lines.append("let (data, response) = try await URLSession.shared.data(for: request)")
@@ -983,7 +1025,18 @@ public final class DeveloperActionsEngine: Sendable {
             } else {
                 let fallbackISO = ISO8601DateFormatter()
                 fallbackISO.formatOptions = [.withInternetDateTime]
-                resolvedDate = fallbackISO.date(from: trimmed)
+                if let d = fallbackISO.date(from: trimmed) {
+                    resolvedDate = d
+                } else {
+                    // Support SQL / log timestamps like "2023-11-14 22:13:20", "2023-11-14 22:13:20 UTC", or "2023-11-14T22:13:20"
+                    let normalized = trimmed
+                        .replacingOccurrences(of: " UTC", with: "Z")
+                        .replacingOccurrences(of: " ", with: "T")
+                    let withZ = (normalized.hasSuffix("Z") || normalized.contains("+") || normalized.dropFirst(10).contains("-"))
+                        ? normalized
+                        : normalized + "Z"
+                    resolvedDate = isoFormatter.date(from: withZ) ?? fallbackISO.date(from: withZ)
+                }
             }
         }
 

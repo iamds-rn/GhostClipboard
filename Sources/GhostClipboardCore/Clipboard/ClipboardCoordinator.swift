@@ -140,7 +140,17 @@ public final class ClipboardCoordinator: ObservableObject {
 
         if oldValue.monitoringPaused != adjusted.monitoringPaused {
             lastChangeCount = NSPasteboard.general.changeCount
-            lastStatusBanner = adjusted.monitoringPaused ? "Clipboard monitoring paused" : "Clipboard monitoring active"
+            if adjusted.monitoringPaused {
+                pasteboardTimer?.cancel()
+                pasteboardTimer = nil
+                lastStatusBanner = "Clipboard monitoring paused"
+            } else {
+                if isMonitoringRequested && !isSleepingOrScreenLocked {
+                    let leeway = isBackgroundCoalesced ? 400 : 150
+                    configurePasteboardDispatchTimer(interval: currentPollInterval, leewayMs: leeway)
+                }
+                lastStatusBanner = "Clipboard monitoring active"
+            }
         } else if oldValue.hotkeyKeyCode != adjusted.hotkeyKeyCode || oldValue.hotkeyModifiers != adjusted.hotkeyModifiers {
             lastStatusBanner = "Global shortcut updated to \(adjusted.hotkeyDisplayString)"
         } else if oldValue.directPasteToActiveApp != adjusted.directPasteToActiveApp {
@@ -345,7 +355,7 @@ public final class ClipboardCoordinator: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
                 self.isBackgroundCoalesced = false
-                if self.isMonitoringRequested && !self.isSleepingOrScreenLocked {
+                if self.isMonitoringRequested && !self.isSleepingOrScreenLocked && !self.preferences.monitoringPaused {
                     self.configurePasteboardDispatchTimer(interval: self.currentPollInterval, leewayMs: 150)
                 }
             }
@@ -359,7 +369,7 @@ public final class ClipboardCoordinator: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
                 self.isBackgroundCoalesced = true
-                if self.isMonitoringRequested && !self.isSleepingOrScreenLocked {
+                if self.isMonitoringRequested && !self.isSleepingOrScreenLocked && !self.preferences.monitoringPaused {
                     self.configurePasteboardDispatchTimer(interval: max(self.currentPollInterval, 0.55), leewayMs: 400)
                 }
             }
@@ -380,8 +390,10 @@ public final class ClipboardCoordinator: ObservableObject {
         isSleepingOrScreenLocked = false
         runRetentionCycle()
         if isMonitoringRequested {
-            let leeway = isBackgroundCoalesced ? 400 : 150
-            configurePasteboardDispatchTimer(interval: currentPollInterval, leewayMs: leeway)
+            if !preferences.monitoringPaused {
+                let leeway = isBackgroundCoalesced ? 400 : 150
+                configurePasteboardDispatchTimer(interval: currentPollInterval, leewayMs: leeway)
+            }
             configureLowFrequencyDBMaintenanceTimer()
         }
     }
@@ -432,7 +444,12 @@ public final class ClipboardCoordinator: ObservableObject {
         isMonitoringRequested = true
         lastChangeCount = NSPasteboard.general.changeCount
 
-        configurePasteboardDispatchTimer(interval: pollInterval, leewayMs: isBackgroundCoalesced ? 400 : 150)
+        if !preferences.monitoringPaused && !isSleepingOrScreenLocked {
+            configurePasteboardDispatchTimer(interval: pollInterval, leewayMs: isBackgroundCoalesced ? 400 : 150)
+        } else {
+            pasteboardTimer?.cancel()
+            pasteboardTimer = nil
+        }
         configureLowFrequencyDBMaintenanceTimer()
         updateEphemeralTimerLifecycle()
     }

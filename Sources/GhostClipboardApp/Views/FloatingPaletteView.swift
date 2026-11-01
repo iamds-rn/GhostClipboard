@@ -147,7 +147,7 @@ public struct FloatingPaletteView: View {
             guard event.window is FloatingPalettePanel else {
                 return event
             }
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
 
             // Instant ⌘1 – ⌘9 quick-select shortcuts
             if flags == .command, let targetIdx = Self.commandNumberKeyCodeToIndex[event.keyCode] {

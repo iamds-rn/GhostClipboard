@@ -95,37 +95,52 @@ public final class CryptoVault: Sendable {
         var expandedWords: [String] = []
         expandedWords.reserveCapacity(min(rawParts.count * 2, 256))
 
-        for part in rawParts.prefix(160) {
+        for part in rawParts.prefix(240) {
             let lower = part.lowercased()
             expandedWords.append(lower)
 
-            // Also split camelCase transitions (e.g. "calculateHash" -> "calculate", "hash")
+            // Split camelCase transitions (e.g. "calculateQuantumSignature" -> "calculate", "quantum", "signature", "quantumsignature")
             let camelSubwords = splitCamelCase(part)
             if camelSubwords.count > 1 {
-                for sub in camelSubwords where sub.count >= 3 {
-                    expandedWords.append(sub.lowercased())
+                for idx in camelSubwords.indices {
+                    let sub = camelSubwords[idx]
+                    if sub.count >= 3 {
+                        expandedWords.append(sub.lowercased())
+                    }
+                    if idx > 0 {
+                        let tail = camelSubwords[idx...].joined().lowercased()
+                        if tail.count >= 3 {
+                            expandedWords.append(tail)
+                        }
+                    }
                 }
             }
         }
 
         var uniqueTokens = Set<String>()
         var orderedTokens: [String] = []
+        let maxTokenBudget = 1024
 
         func addToken(_ t: String) {
-            guard !t.isEmpty, uniqueTokens.count < 320 else { return }
+            guard !t.isEmpty, uniqueTokens.count < maxTokenBudget else { return }
             if uniqueTokens.insert(t).inserted {
                 orderedTokens.append(t)
             }
         }
 
+        // Pass 1: Add all full words and camelCase subwords first so later words in long clips are never starved by prefixes
         for word in expandedWords {
             let capped = String(word.prefix(24))
-            if capped.count >= 1 {
+            if !capped.isEmpty {
                 addToken(capped)
             }
-            // Generate prefixes of length 3 ... min(capped.count, 16) so 3+ char prefix queries hit the blind index
+        }
+
+        // Pass 2: Add prefixes of length 3 ... min(capped.count, 24) so any 3+ char prefix query hits the blind index
+        for word in expandedWords {
+            let capped = String(word.prefix(24))
             if capped.count >= 3 {
-                let maxPrefix = min(capped.count, 16)
+                let maxPrefix = min(capped.count, 24)
                 for len in 3...maxPrefix {
                     addToken(String(capped.prefix(len)))
                 }
@@ -188,12 +203,37 @@ public final class CryptoVault: Sendable {
             return SymmetricKey(data: existingData)
         }
 
-        // 2. Generate new 256-bit key and store in 0600-restricted local key file
+        // 2. Non-interactive Keychain recovery if local file is missing
+        if let keychainData = Self.loadMasterKeyFromKeychainNonInteractive(), keychainData.count == 32 {
+            try? Self.persistLocalKeyFile(keychainData, to: keyFileURL)
+            return SymmetricKey(data: keychainData)
+        }
+
+        // 3. Generate new 256-bit key and store in 0600-restricted local key file
         let newKey = SymmetricKey(size: .bits256)
         let keyData = newKey.withUnsafeBytes { Data($0) }
         try? Self.persistLocalKeyFile(keyData, to: keyFileURL)
 
         return newKey
+    }
+
+    private static func loadMasterKeyFromKeychainNonInteractive() -> Data? {
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.serviceName,
+            kSecAttrAccount as String: Self.accountName,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationContext as String: context
+        ]
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        guard status == errSecSuccess, let data = item as? Data, data.count == 32 else {
+            return nil
+        }
+        return data
     }
 
     private static func persistLocalKeyFile(_ keyData: Data, to keyFileURL: URL) throws {
@@ -226,6 +266,13 @@ public final class CryptoVault: Sendable {
         addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         let status = SecItemAdd(addQuery as CFDictionary, nil)
         return status == errSecSuccess
+    }
+
+    public func keyStorageSummary() -> String {
+        let path = Self.localKeyFileURL().path
+        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+        let perms = (attrs?[.posixPermissions] as? NSNumber)?.intValue ?? 0
+        return String(format: "%@ (POSIX 0%o) + HKDF Blind-Index Subkey", path, perms)
     }
 
     // MARK: - LocalAuthentication Biometric / Passcode Gate

@@ -228,7 +228,7 @@ public final class SQLiteStorageEngine: @unchecked Sendable {
     private func migrateFTSIndexToBlindTokensIfNeeded() throws {
         try queue.sync {
             let migrated = scalarInt("SELECT COUNT(*) FROM preferences WHERE key = 'blind_fts_v2_migrated' AND value = '1';") > 0
-            let hasLegacyPlaintextFTS = scalarInt("SELECT COUNT(*) FROM clips_fts WHERE searchable_text NOT LIKE 'bi_%' AND searchable_text != '';") > 0
+            let hasLegacyPlaintextFTS = scalarInt("SELECT COUNT(*) FROM clips_fts WHERE (searchable_text NOT LIKE 'bi_%' AND searchable_text != '') OR (category NOT LIKE 'bi_%' AND category != '');") > 0
 
             guard !migrated || hasLegacyPlaintextFTS else { return }
 
@@ -247,12 +247,15 @@ public final class SQLiteStorageEngine: @unchecked Sendable {
             try executeRawInternal("DELETE FROM clips_fts;")
 
             for clip in existingClips where clip.sensitivityLevel == .normal && !clip.isEphemeral {
-                // Also ensure url_hostname is encrypted at rest
-                if let host = clip.urlHostname, let encHost = encryptOptionalField(host) {
+                // Ensure both url_hostname and terminal_warning are encrypted at rest
+                let encHost = encryptOptionalField(clip.urlHostname)
+                let encWarn = encryptOptionalField(clip.terminalSafetyWarning)
+                if encHost != nil || encWarn != nil {
                     var upStmt: OpaquePointer?
-                    if sqlite3_prepare_v2(db, "UPDATE clips SET url_hostname = ? WHERE id = ?;", -1, &upStmt, nil) == SQLITE_OK {
-                        bindText(upStmt, index: 1, value: encHost)
-                        bindText(upStmt, index: 2, value: clip.id.uuidString)
+                    if sqlite3_prepare_v2(db, "UPDATE clips SET url_hostname = ?, terminal_warning = ? WHERE id = ?;", -1, &upStmt, nil) == SQLITE_OK {
+                        bindOptionalText(upStmt, index: 1, value: encHost)
+                        bindOptionalText(upStmt, index: 2, value: encWarn)
+                        bindText(upStmt, index: 3, value: clip.id.uuidString)
                         sqlite3_step(upStmt)
                         sqlite3_finalize(upStmt)
                     }
@@ -656,27 +659,49 @@ public final class SQLiteStorageEngine: @unchecked Sendable {
 
     private func clipMatchesQueryInMemory(_ clip: ClipItem, query: String) -> Bool {
         let lowerQ = query.lowercased()
-        if clip.content.lowercased().contains(lowerQ) ||
-           clip.primaryCategory.displayName.lowercased().contains(lowerQ) ||
-           clip.primaryCategory.shortLabel.lowercased().contains(lowerQ) ||
-           (clip.detectedLanguage?.rawValue.lowercased().contains(lowerQ) ?? false) ||
-           (clip.sourceApplication?.lowercased().contains(lowerQ) ?? false) ||
-           (clip.urlHostname?.lowercased().contains(lowerQ) ?? false) {
+        let haystack = [
+            clip.content.lowercased(),
+            clip.primaryCategory.displayName.lowercased(),
+            clip.primaryCategory.shortLabel.lowercased(),
+            clip.detectedLanguage?.rawValue.lowercased() ?? "",
+            clip.sourceApplication?.lowercased() ?? "",
+            clip.urlHostname?.lowercased() ?? ""
+        ].joined(separator: " ")
+
+        if haystack.contains(lowerQ) {
             return true
         }
+
         // Multi-token check: all whitespace-separated query words appear somewhere in the clip or metadata
         let words = lowerQ.split(whereSeparator: { $0.isWhitespace }).map(String.init)
-        if words.count > 1 {
-            let haystack = [
-                clip.content.lowercased(),
-                clip.primaryCategory.displayName.lowercased(),
-                clip.detectedLanguage?.rawValue.lowercased() ?? "",
-                clip.sourceApplication?.lowercased() ?? "",
-                clip.urlHostname?.lowercased() ?? ""
-            ].joined(separator: " ")
-            return words.allSatisfy { haystack.contains($0) }
+        if words.count > 1 && words.allSatisfy({ haystack.contains($0) }) {
+            return true
         }
+
+        // Punctuation-separated multi-token check (e.g. "Xcode: calculate" or "deploy, release")
+        let alphaNumTokens = lowerQ.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
+        if !alphaNumTokens.isEmpty && alphaNumTokens.allSatisfy({ haystack.contains($0) }) {
+            // Also verify any non-ASCII symbols/emojis in the query (e.g. "🚀 deploy") are present
+            let nonASCIISymbols = lowerQ.filter { !$0.isASCII && !$0.isLetter && !$0.isNumber && !$0.isWhitespace }
+            if nonASCIISymbols.allSatisfy({ haystack.contains($0) }) {
+                return true
+            }
+        }
+
         return false
+    }
+
+    private func fetchClipByIDInternal(_ clipID: UUID) -> ClipItem? {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT * FROM clips WHERE id = ? LIMIT 1;", -1, &stmt, nil) == SQLITE_OK else {
+            return nil
+        }
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, index: 1, value: clipID.uuidString)
+        if sqlite3_step(stmt) == SQLITE_ROW {
+            return decodeClipRow(stmt)
+        }
+        return nil
     }
 
     private func decodeClipRow(_ stmt: OpaquePointer?) -> ClipItem? {
@@ -775,15 +800,22 @@ public final class SQLiteStorageEngine: @unchecked Sendable {
     }
 
     public func overrideCategory(clipID: UUID, newCategory: ClipCategory) throws {
-        queue.sync {
+        try queue.sync {
             let sql = "UPDATE clips SET primary_category = ?, user_overrode_category = 1, updated_at = ? WHERE id = ?;"
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
-            defer { sqlite3_finalize(stmt) }
             bindText(stmt, index: 1, value: newCategory.rawValue)
             sqlite3_bind_double(stmt, 2, Date().timeIntervalSince1970)
             bindText(stmt, index: 3, value: clipID.uuidString)
             sqlite3_step(stmt)
+            sqlite3_finalize(stmt)
+
+            if let updatedClip = fetchClipByIDInternal(clipID) {
+                try updateCategoryAssignmentsInternal(for: updatedClip)
+                if updatedClip.sensitivityLevel == .normal && !updatedClip.isEphemeral {
+                    try indexClipInFTSInternal(updatedClip)
+                }
+            }
         }
     }
 
@@ -1008,13 +1040,9 @@ public final class SQLiteStorageEngine: @unchecked Sendable {
             bindText(stmt, index: 8, value: clipID.uuidString)
             sqlite3_step(stmt)
 
-            let blindTokens = vault.blindIndexTokens(for: newContent)
-            var ftsStmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, "UPDATE clips_fts SET searchable_text = ? WHERE clip_id = ?;", -1, &ftsStmt, nil) == SQLITE_OK {
-                defer { sqlite3_finalize(ftsStmt) }
-                bindText(ftsStmt, index: 1, value: blindTokens)
-                bindText(ftsStmt, index: 2, value: clipID.uuidString)
-                sqlite3_step(ftsStmt)
+            if let updatedClip = fetchClipByIDInternal(clipID),
+               updatedClip.sensitivityLevel == .normal && !updatedClip.isEphemeral {
+                try indexClipInFTSInternal(updatedClip)
             }
         }
     }

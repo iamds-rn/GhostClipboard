@@ -736,6 +736,90 @@ struct GhostClipboardTestRunner {
 
                 let mergedRecent = regCoord.copyMergedClips(pinnedOnly: false, limit: 2, separator: "\n---\n")
                 assertTrue(!mergedRecent.isEmpty && mergedRecent.contains("\n---\n"))
+
+                // 18. Deep Edge-Case Regression Suite (Long Clip Blind Index, 17..23-char Prefixes, Punctuation/Emoji Search, Override Category Sync, Function/Arrow Hotkeys, Paused Timer, cURL/JWT/Timestamp Edge Cases)
+                let edgeURL = URL(fileURLWithPath: NSTemporaryDirectory())
+                    .appendingPathComponent("ghost_edge_\(UUID().uuidString).sqlite3")
+                defer {
+                    try? FileManager.default.removeItem(at: edgeURL)
+                    try? FileManager.default.removeItem(atPath: edgeURL.path + "-wal")
+                    try? FileManager.default.removeItem(atPath: edgeURL.path + "-shm")
+                }
+                let edgeDB = try SQLiteStorageEngine(databaseURL: edgeURL, vault: vault)
+
+                // 18a. Long clip (>55 words) + 17..23 char prefix + camelCase tail blind indexing
+                let fillerWords = (1...55).map { "fillerIdentifierWord\($0)" }.joined(separator: " ")
+                let longClipText = "\(fillerWords) authenticationProviderConfiguration TailCanaryToken55"
+                let longClip = ClipItem(
+                    content: longClipText,
+                    contentHash: CryptoVault.sha256Hex(longClipText),
+                    primaryCategory: .code,
+                    detectedLanguage: .swift,
+                    sourceApplication: "Xcode"
+                )
+                try edgeDB.saveClip(longClip)
+
+                // Verify the 56th+ words are present in the blind index tokens directly (not starved by prefixes of words 1..30)
+                let longBlindTokens = vault.blindIndexTokens(for: longClipText)
+                let tailTokenHash = vault.blindIndexToken(for: "tailcanarytoken55")
+                let longPrefix18Hash = vault.blindIndexToken(for: "authenticationprov") // 18-char prefix (>16)
+                assertTrue(longBlindTokens.contains(tailTokenHash), "56th word in clip must not be dropped from blind index")
+                assertTrue(longBlindTokens.contains(longPrefix18Hash), "18-char prefix must be present in blind index")
+                assertEqual(try edgeDB.searchClips("authenticationProv").count, 1, "18-char prefix search must match")
+                assertEqual(try edgeDB.searchClips("TailCanaryToken55").count, 1, "Word after 50+ earlier words must match")
+
+                // 18b. Emoji + Punctuation multi-word queries
+                let emojiClipText = "🚀 Deploy production release v2.4.0 to cluster"
+                try edgeDB.saveClip(ClipItem(
+                    content: emojiClipText,
+                    contentHash: CryptoVault.sha256Hex(emojiClipText),
+                    primaryCategory: .plainText,
+                    sourceApplication: "Terminal"
+                ))
+                assertEqual(try edgeDB.searchClips("🚀 deploy").count, 1, "Emoji + word query must match")
+                assertEqual(try edgeDB.searchClips("deploy, release").count, 1, "Comma-punctuated multi-word query must match")
+                assertEqual(try edgeDB.searchClips("Xcode: TailCanaryToken55").count, 1, "Colon-punctuated app + token query must match")
+
+                // 18c. overrideCategory updates clip_category_assignments and clips_fts
+                try edgeDB.overrideCategory(clipID: longClip.id, newCategory: .json)
+                assertEqual(try edgeDB.fetchClips(category: .code).count, 0, "Old category assignment must be replaced on overrideCategory")
+                assertEqual(try edgeDB.fetchClips(category: .json).count, 1, "New category assignment must be active after overrideCategory")
+
+                // 18d. Function keys (F1-F12), Arrow keys, and Modifier-only keyCode guard in ShortcutFormatter
+                assertEqual(ShortcutFormatter.displayString(keyCode: 122, carbonModifiers: ShortcutFormatter.carbonCmdKey), "⌘F1")
+                assertEqual(ShortcutFormatter.displayString(keyCode: 111, carbonModifiers: ShortcutFormatter.carbonOptionKey | ShortcutFormatter.carbonShiftKey), "⌥⇧F12")
+                assertEqual(ShortcutFormatter.displayString(keyCode: 123, carbonModifiers: ShortcutFormatter.carbonControlKey | ShortcutFormatter.carbonOptionKey), "⌃⌥←")
+                assertEqual(ShortcutFormatter.displayString(keyCode: 126, carbonModifiers: ShortcutFormatter.carbonCmdKey), "⌘↑")
+                assertEqual(ShortcutFormatter.isModifierOnlyKeyCode(55), true, "kVK_Command must be recognized as modifier-only")
+                assertEqual(ShortcutFormatter.isModifierOnlyKeyCode(56), true, "kVK_Shift must be recognized as modifier-only")
+                assertEqual(ShortcutFormatter.isModifierOnlyKeyCode(49), false, "kVK_Space must not be modifier-only")
+
+                // 18e. Paused monitoring actually cancels pasteboardTimer
+                let edgeCoord = ClipboardCoordinator(storage: edgeDB)
+                edgeCoord.startMonitoring()
+                assertEqual(edgeCoord.runtimeEfficiencySnapshot().isPasteboardPollingPaused, false)
+                edgeCoord.preferences.monitoringPaused = true
+                assertEqual(edgeCoord.runtimeEfficiencySnapshot().isPasteboardPollingPaused, true)
+                edgeCoord.preferences.monitoringPaused = false
+                assertEqual(edgeCoord.runtimeEfficiencySnapshot().isPasteboardPollingPaused, false)
+                edgeCoord.stopMonitoring()
+
+                // 18f. Quoted JWT, cURL with -XPOST / -o / localhost / multiple -d, and SQL space-separated timestamps
+                let quotedJWT = "\"\(sampleJWT)\""
+                assertNotNil(actionsEngine.decodeJWT(quotedJWT), "Quoted JWT string literal must decode cleanly")
+
+                let trickyCurl = "curl -XPOST -o output.json -A 'Mozilla/5.0' -d 'a=1' -d 'b=2' localhost:8080/graphql"
+                let trickyFetch = actionsEngine.convertCurlToJSFetch(trickyCurl)
+                assertNotNil(trickyFetch)
+                assertTrue(trickyFetch?.contains("fetch(\"http://localhost:8080/graphql\"") == true, "Must not confuse output.json or Mozilla/5.0 with target URL")
+                assertTrue(trickyFetch?.contains("method: \"POST\"") == true, "Attached -XPOST flag must be parsed")
+                assertTrue(trickyFetch?.contains("a=1&b=2") == true, "Multiple -d flags must be combined with &")
+
+                let sqlTimestamp = actionsEngine.parseTimestamp("2023-11-14 22:13:20")
+                assertNotNil(sqlTimestamp, "Space-separated SQL timestamp must parse")
+                assertEqual(sqlTimestamp?.epochSeconds, 1_700_000_000)
+
+                assertTrue(vault.keyStorageSummary().contains("HKDF Blind-Index Subkey"))
             }
         } catch {
             failedCount += 1

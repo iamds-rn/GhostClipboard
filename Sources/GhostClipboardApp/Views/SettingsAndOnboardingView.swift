@@ -263,13 +263,16 @@ public struct SettingsWindowView: View {
                 stopShortcutRecording()
                 return nil
             }
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let keyCode = UInt32(event.keyCode)
+            guard !ShortcutFormatter.isModifierOnlyKeyCode(keyCode) else {
+                return nil
+            }
+            let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
             let carbonMods = ShortcutFormatter.carbonModifiers(from: flags)
             // Require at least one modifier (Command, Option, Control, or Shift)
             guard carbonMods != 0 else {
                 return nil
             }
-            let keyCode = UInt32(event.keyCode)
             var updated = coordinator.preferences
             updated.hotkeyKeyCode = keyCode
             updated.hotkeyModifiers = carbonMods
