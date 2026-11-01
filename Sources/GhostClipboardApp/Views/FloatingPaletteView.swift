@@ -92,17 +92,25 @@ public struct FloatingPaletteView: View {
     }
 
     public var body: some View {
-        VStack(spacing: 0) {
-            headerBar
-            Divider().overlay(GhostTheme.border(scheme))
+        GeometryReader { proxy in
+            let leftWidth = max(240, min(330, floor(proxy.size.width * 0.48)))
+            let rightWidth = max(240, proxy.size.width - leftWidth - 1)
 
-            categoryStrip
-            Divider().overlay(GhostTheme.border(scheme))
+            VStack(spacing: 0) {
+                headerBar
+                Divider().overlay(GhostTheme.border(scheme))
 
-            mainSplitContent
-            Divider().overlay(GhostTheme.border(scheme))
+                categoryStrip
+                Divider().overlay(GhostTheme.border(scheme))
 
-            footerBar
+                mainSplitContent(leftWidth: leftWidth, rightWidth: rightWidth)
+                    .frame(maxHeight: .infinity)
+                Divider().overlay(GhostTheme.border(scheme))
+
+                footerBar
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            .clipped()
         }
         // Section 7.3.1: Default 640x480, min 520, max 760
         .frame(minWidth: 520, idealWidth: 640, maxWidth: 760, minHeight: 420, idealHeight: 480, maxHeight: 600)
@@ -112,6 +120,7 @@ public struct FloatingPaletteView: View {
                 .stroke(GhostTheme.border(scheme), lineWidth: 1)
         )
         .cornerRadius(10)
+        .clipped()
         .preferredColorScheme(coordinator.preferences.resolvedColorScheme)
         .onAppear {
             now = Date()
@@ -256,6 +265,7 @@ public struct FloatingPaletteView: View {
                         .font(.system(size: 11))
                     Text("UUID v4")
                         .font(GhostTheme.metadataFont)
+                        .lineLimit(1)
                 }
                 .foregroundColor(GhostTheme.accent)
                 .padding(.horizontal, 7)
@@ -264,6 +274,7 @@ public struct FloatingPaletteView: View {
                 .cornerRadius(4)
             }
             .buttonStyle(.plain)
+            .fixedSize()
             .help("Generate a fresh UUID v4 and copy to clipboard")
 
             // Monitoring status indicator
@@ -277,6 +288,7 @@ public struct FloatingPaletteView: View {
                     Text(coordinator.preferences.monitoringPaused ? "Paused" : "Capturing")
                         .font(GhostTheme.metadataFont)
                         .foregroundColor(GhostTheme.textSecondary(scheme))
+                        .lineLimit(1)
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
@@ -284,9 +296,10 @@ public struct FloatingPaletteView: View {
                 .cornerRadius(4)
             }
             .buttonStyle(.plain)
+            .fixedSize()
             .help("Toggle live clipboard monitoring")
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, 20)
         .padding(.vertical, 10)
         .background(GhostTheme.surface(scheme))
     }
@@ -312,7 +325,7 @@ public struct FloatingPaletteView: View {
                     .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 20)
             .padding(.vertical, 8)
         }
         .background(GhostTheme.background(scheme))
@@ -320,15 +333,15 @@ public struct FloatingPaletteView: View {
 
     // MARK: - 7.3.4 Results List & Quick Compact Preview
 
-    private var mainSplitContent: some View {
+    private func mainSplitContent(leftWidth: CGFloat, rightWidth: CGFloat) -> some View {
         let clips = filteredClips
         return HStack(spacing: 0) {
             if clips.isEmpty {
                 emptyStateView
             } else {
-                ScrollViewReader { proxy in
+                ScrollViewReader { scrollProxy in
                     ScrollView {
-                        LazyVStack(spacing: 2) {
+                        LazyVStack(spacing: 3) {
                             ForEach(Array(clips.enumerated()), id: \.element.id) { idx, clip in
                                 paletteRow(clip: clip, index: idx, isSelected: idx == selectedIndex)
                                     .id(clip.id)
@@ -342,24 +355,27 @@ public struct FloatingPaletteView: View {
                                     )
                             }
                         }
-                        .padding(6)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
                     }
                     .onChange(of: selectedIndex) { newIdx in
                         if newIdx >= 0 && newIdx < clips.count {
                             withAnimation(.easeOut(duration: 0.12)) {
-                                proxy.scrollTo(clips[newIdx].id, anchor: .center)
+                                scrollProxy.scrollTo(clips[newIdx].id, anchor: .center)
                             }
                         }
                     }
                 }
-                .frame(width: 315)
+                .frame(width: leftWidth)
+                .clipped()
 
                 Divider().overlay(GhostTheme.border(scheme))
 
                 // Right quick preview pane
                 if let current = selectedClip {
                     compactInspectorPane(for: current)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .frame(width: rightWidth)
+                        .clipped()
                 }
             }
         }
@@ -386,11 +402,13 @@ public struct FloatingPaletteView: View {
                         .font(clip.primaryCategory == .code || clip.primaryCategory == .json || clip.primaryCategory == .terminalCommand ? GhostTheme.codeFont : GhostTheme.bodyFont)
                         .foregroundColor(GhostTheme.textPrimary(scheme))
                         .lineLimit(1)
+                        .truncationMode(.tail)
 
                     Spacer(minLength: 4)
 
                     if index < 9 {
                         KeycapBadge("⌘\(index + 1)")
+                            .fixedSize()
                     }
                 }
 
@@ -399,24 +417,29 @@ public struct FloatingPaletteView: View {
                         label: clip.detectedLanguage?.shortBadge ?? clip.primaryCategory.shortLabel,
                         isHighlighted: isSelected
                     )
+                    .fixedSize()
 
                     if let app = clip.sourceApplication {
                         Text(app)
                             .font(GhostTheme.metadataFont)
                             .foregroundColor(GhostTheme.textMuted(scheme))
                             .lineLimit(1)
+                            .truncationMode(.tail)
+                            .layoutPriority(-1)
                     }
 
-                    Spacer()
+                    Spacer(minLength: 4)
 
                     if let rem = clip.remainingSeconds(at: now), rem < 3600 {
                         Text("\(Int(rem))s")
                             .font(GhostTheme.badgeFont)
                             .foregroundColor(GhostTheme.warning)
+                            .fixedSize()
                     } else {
                         Text(shortRelativeTime(clip.createdAt))
                             .font(GhostTheme.metadataFont)
                             .foregroundColor(GhostTheme.textMuted(scheme))
+                            .fixedSize()
                     }
 
                     if clip.isPinned {
@@ -427,7 +450,7 @@ public struct FloatingPaletteView: View {
                 }
             }
         }
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(isSelected ? GhostTheme.elevated(scheme) : Color.clear)
         .overlay(
@@ -439,16 +462,19 @@ public struct FloatingPaletteView: View {
 
     private func compactInspectorPane(for clip: ClipItem) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
+            HStack(spacing: 6) {
                 Text(clip.primaryCategory.displayName.uppercased())
                     .font(GhostTheme.badgeFont)
                     .foregroundColor(GhostTheme.accent)
+                    .lineLimit(1)
                 if let lang = clip.detectedLanguage {
                     Text("• \(lang.rawValue)")
                         .font(GhostTheme.metadataFont)
                         .foregroundColor(GhostTheme.textSecondary(scheme))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 }
-                Spacer()
+                Spacer(minLength: 4)
                 Button {
                     showActionMenu = true
                 } label: {
@@ -459,8 +485,10 @@ public struct FloatingPaletteView: View {
                     }
                 }
                 .buttonStyle(.plain)
+                .fixedSize()
             }
-            .padding(10)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
             .background(GhostTheme.surface(scheme))
 
             Divider().overlay(GhostTheme.border(scheme))
@@ -479,17 +507,21 @@ public struct FloatingPaletteView: View {
                         Text(clip.maskedPreview)
                             .font(GhostTheme.codeFont)
                             .foregroundColor(GhostTheme.warning)
+                            .fixedSize(horizontal: false, vertical: true)
                     } else if (clip.primaryCategory == .code || clip.primaryCategory == .json) && coordinator.preferences.syntaxHighlightingEnabled {
                         Text(SyntaxHighlighter.highlight(previewText, language: clip.detectedLanguage, scheme: scheme))
+                            .fixedSize(horizontal: false, vertical: true)
                             .textSelection(.enabled)
                     } else {
                         Text(previewText)
                             .font(GhostTheme.codeFont)
                             .foregroundColor(GhostTheme.textPrimary(scheme))
+                            .fixedSize(horizontal: false, vertical: true)
                             .textSelection(.enabled)
                     }
                 }
-                .padding(10)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
@@ -502,12 +534,14 @@ public struct FloatingPaletteView: View {
                 } label: {
                     HStack(spacing: 4) {
                         Text(primaryReturnLabel)
+                            .lineLimit(1)
                         KeycapBadge("↩")
                     }
                     .font(GhostTheme.metadataFont)
                     .foregroundColor(GhostTheme.textPrimary(scheme))
                 }
                 .buttonStyle(.plain)
+                .fixedSize()
 
                 Button {
                     let plain = clip.content.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -515,25 +549,29 @@ public struct FloatingPaletteView: View {
                 } label: {
                     HStack(spacing: 4) {
                         Text("Plain")
+                            .lineLimit(1)
                         KeycapBadge("⌘↩")
                     }
                     .font(GhostTheme.metadataFont)
                     .foregroundColor(GhostTheme.textSecondary(scheme))
                 }
                 .buttonStyle(.plain)
+                .fixedSize()
 
-                Spacer()
+                Spacer(minLength: 4)
 
                 Button {
                     onOpenFullHistory()
                 } label: {
-                    Label("Full Workspace", systemImage: "macwindow")
+                    Label("Workspace", systemImage: "macwindow")
                         .font(GhostTheme.metadataFont)
                         .foregroundColor(GhostTheme.accent)
+                        .lineLimit(1)
                 }
                 .buttonStyle(.plain)
+                .fixedSize()
             }
-            .padding(.horizontal, 10)
+            .padding(.horizontal, 14)
             .padding(.vertical, 8)
             .background(GhostTheme.surface(scheme))
         }
@@ -550,7 +588,9 @@ public struct FloatingPaletteView: View {
             Text("Copy code, URLs, JSON, Markdown, or colors to capture automatically.")
                 .font(GhostTheme.metadataFont)
                 .foregroundColor(GhostTheme.textMuted(scheme))
+                .multilineTextAlignment(.center)
         }
+        .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -558,7 +598,17 @@ public struct FloatingPaletteView: View {
 
     private var footerBar: some View {
         let clips = filteredClips
-        return HStack(spacing: 10) {
+        return ViewThatFits(in: .horizontal) {
+            footerRowContent(clipsCount: clips.count, showQuickPickHint: true)
+            footerRowContent(clipsCount: clips.count, showQuickPickHint: false)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 8)
+        .background(GhostTheme.surface(scheme))
+    }
+
+    private func footerRowContent(clipsCount: Int, showQuickPickHint: Bool) -> some View {
+        HStack(spacing: 10) {
             HStack(spacing: 4) {
                 Button {
                     if selectedIndex > 0 { selectedIndex -= 1 }
@@ -567,7 +617,7 @@ public struct FloatingPaletteView: View {
                 .keyboardShortcut(.upArrow, modifiers: [])
 
                 Button {
-                    if selectedIndex + 1 < clips.count { selectedIndex += 1 }
+                    if selectedIndex + 1 < clipsCount { selectedIndex += 1 }
                 } label: { KeycapBadge("↓") }
                 .buttonStyle(.plain)
                 .keyboardShortcut(.downArrow, modifiers: [])
@@ -575,7 +625,9 @@ public struct FloatingPaletteView: View {
                 Text("Navigate")
                     .font(GhostTheme.metadataFont)
                     .foregroundColor(GhostTheme.textMuted(scheme))
+                    .lineLimit(1)
             }
+            .fixedSize()
 
             HStack(spacing: 4) {
                 Button {
@@ -589,13 +641,19 @@ public struct FloatingPaletteView: View {
                 Text(primaryReturnLabel)
                     .font(GhostTheme.metadataFont)
                     .foregroundColor(GhostTheme.textMuted(scheme))
+                    .lineLimit(1)
             }
+            .fixedSize()
 
-            HStack(spacing: 4) {
-                KeycapBadge("⌘1–9")
-                Text("Quick Pick")
-                    .font(GhostTheme.metadataFont)
-                    .foregroundColor(GhostTheme.textMuted(scheme))
+            if showQuickPickHint {
+                HStack(spacing: 4) {
+                    KeycapBadge("⌘1–9")
+                    Text("Quick Pick")
+                        .font(GhostTheme.metadataFont)
+                        .foregroundColor(GhostTheme.textMuted(scheme))
+                        .lineLimit(1)
+                }
+                .fixedSize()
             }
 
             HStack(spacing: 4) {
@@ -608,9 +666,11 @@ public struct FloatingPaletteView: View {
                 Text("Actions")
                     .font(GhostTheme.metadataFont)
                     .foregroundColor(GhostTheme.textMuted(scheme))
+                    .lineLimit(1)
             }
+            .fixedSize()
 
-            Spacer()
+            Spacer(minLength: 6)
 
             // Active Global Hotkey & Privacy status
             HStack(spacing: 6) {
@@ -618,10 +678,12 @@ public struct FloatingPaletteView: View {
                 Image(systemName: "lock.fill")
                     .font(.system(size: 10))
                     .foregroundColor(GhostTheme.success)
-                Text("Blind FTS • \(clips.count) items")
+                Text("Blind FTS • \(clipsCount) items")
                     .font(GhostTheme.metadataFont)
                     .foregroundColor(GhostTheme.textSecondary(scheme))
+                    .lineLimit(1)
             }
+            .fixedSize()
 
             Button {
                 onOpenSettings()
@@ -631,10 +693,8 @@ public struct FloatingPaletteView: View {
                     .foregroundColor(GhostTheme.textSecondary(scheme))
             }
             .buttonStyle(.plain)
+            .fixedSize()
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(GhostTheme.surface(scheme))
     }
 
     // MARK: - Cmd+K Developer Action Menu Sheet
@@ -646,13 +706,15 @@ public struct FloatingPaletteView: View {
                 Text("Developer Actions — \(clip.primaryCategory.displayName)")
                     .font(GhostTheme.titleFont)
                     .foregroundColor(GhostTheme.textPrimary(scheme))
+                    .lineLimit(1)
                 Spacer()
                 Button("Close (Esc)") {
                     showActionMenu = false
                 }
                 .keyboardShortcut(.cancelAction)
             }
-            .padding(12)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
             .background(GhostTheme.surface(scheme))
 
             Divider().overlay(GhostTheme.border(scheme))
@@ -668,7 +730,7 @@ public struct FloatingPaletteView: View {
                                 }
                             }
                         } label: {
-                            HStack {
+                            HStack(spacing: 10) {
                                 Image(systemName: action.iconName)
                                     .foregroundColor(action.isWarning ? GhostTheme.warning : GhostTheme.accent)
                                     .frame(width: 20)
@@ -676,28 +738,32 @@ public struct FloatingPaletteView: View {
                                     Text(action.title)
                                         .font(GhostTheme.bodyMedium)
                                         .foregroundColor(GhostTheme.textPrimary(scheme))
+                                        .lineLimit(1)
                                     Text(action.summaryMessage)
                                         .font(GhostTheme.metadataFont)
                                         .foregroundColor(GhostTheme.textMuted(scheme))
                                         .lineLimit(1)
+                                        .truncationMode(.tail)
                                 }
-                                Spacer()
+                                .frame(maxWidth: .infinity, alignment: .leading)
                                 if action.transformedContent != nil {
                                     KeycapBadge("Copy")
+                                        .fixedSize()
                                 }
                             }
-                            .padding(8)
+                            .padding(10)
                             .background(GhostTheme.elevated(scheme))
                             .cornerRadius(6)
                         }
                         .buttonStyle(.plain)
                     }
                 }
-                .padding(12)
+                .padding(16)
             }
         }
-        .frame(width: 480, height: 340)
+        .frame(width: 500, height: 350)
         .background(GhostTheme.background(scheme))
+        .clipped()
     }
 
     private func shortRelativeTime(_ date: Date) -> String {

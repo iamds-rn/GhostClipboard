@@ -62,11 +62,40 @@ public final class GhostAppDelegate: NSObject, NSApplicationDelegate, NSMenuDele
         observePreferences()
         applyThemeAppearance(coordinator.preferences.themeMode)
 
+        DispatchQueue.main.async { [weak self] in
+            self?.configureMainWorkspaceWindows()
+        }
         NSApp.activate(ignoringOtherApps: true)
     }
 
     public func applicationDidBecomeActive(_ notification: Notification) {
         coordinator.syncExternalPreferencesIfNeeded()
+        configureMainWorkspaceWindows()
+    }
+
+    private func configureMainWorkspaceWindows() {
+        for win in NSApp.windows where !(win is NSPanel) && win != settingsWindow {
+            win.contentMinSize = NSSize(width: 760, height: 520)
+            if let screenFrame = (win.screen ?? NSScreen.main)?.visibleFrame {
+                var frame = win.frame
+                var needsAdjust = false
+                if frame.width < 760 {
+                    frame.size.width = min(1100, screenFrame.width - 40)
+                    needsAdjust = true
+                }
+                if frame.height < 520 {
+                    frame.size.height = min(700, screenFrame.height - 40)
+                    needsAdjust = true
+                }
+                if frame.maxX > screenFrame.maxX || frame.minX < screenFrame.minX {
+                    frame.origin.x = screenFrame.minX + max(0, (screenFrame.width - frame.width) / 2)
+                    needsAdjust = true
+                }
+                if needsAdjust {
+                    win.setFrame(frame, display: true)
+                }
+            }
+        }
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
@@ -193,6 +222,7 @@ public final class GhostAppDelegate: NSObject, NSApplicationDelegate, NSMenuDele
 
     @objc public func openMainWorkspace() {
         floatingPanel?.orderOut(nil)
+        configureMainWorkspaceWindows()
         for win in NSApp.windows where !(win is NSPanel) && win != settingsWindow {
             win.makeKeyAndOrderFront(nil)
         }
@@ -222,7 +252,9 @@ public final class GhostAppDelegate: NSObject, NSApplicationDelegate, NSMenuDele
         let hosting = NSHostingController(rootView: settingsView)
         let window = NSWindow(contentViewController: hosting)
         window.title = "GhostClipboard Settings"
-        window.styleMask = [.titled, .closable, .miniaturizable]
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        window.contentMinSize = NSSize(width: 720, height: 520)
+        window.setContentSize(NSSize(width: 760, height: 560))
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -235,6 +267,8 @@ public final class GhostAppDelegate: NSObject, NSApplicationDelegate, NSMenuDele
     private func setupFloatingPalettePanel() {
         let rect = NSRect(x: 0, y: 0, width: 640, height: 480)
         let panel = FloatingPalettePanel(contentRect: rect)
+        panel.contentMinSize = NSSize(width: 520, height: 420)
+        panel.contentMaxSize = NSSize(width: 760, height: 600)
 
         let paletteView = FloatingPaletteView(
             coordinator: coordinator,

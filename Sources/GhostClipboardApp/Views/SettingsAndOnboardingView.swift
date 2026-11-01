@@ -45,79 +45,92 @@ public struct SettingsWindowView: View {
     }
 
     public var body: some View {
-        HStack(spacing: 0) {
-            // Left tab list
-            VStack(alignment: .leading, spacing: 4) {
-                ForEach(SettingsTab.allCases) { tab in
-                    let isSelected = (selectedTab == tab)
-                    Button {
-                        selectedTab = tab
-                        if tab == .general {
-                            isAccessibilityTrusted = AccessibilityPasteHelper.isAccessibilityTrusted
+        GeometryReader { proxy in
+            let sidebarWidth: CGFloat = 200
+            let detailWidth = max(460, proxy.size.width - sidebarWidth - 1)
+
+            HStack(spacing: 0) {
+                // Left tab list
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(SettingsTab.allCases) { tab in
+                        let isSelected = (selectedTab == tab)
+                        Button {
+                            selectedTab = tab
+                            if tab == .general {
+                                isAccessibilityTrusted = AccessibilityPasteHelper.isAccessibilityTrusted
+                            }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: tab.iconName)
+                                    .font(.system(size: 13))
+                                    .foregroundColor(isSelected ? GhostTheme.accent : GhostTheme.textSecondary(scheme))
+                                    .frame(width: 18)
+                                Text(tab.rawValue)
+                                    .font(.system(size: 13, weight: isSelected ? .medium : .regular))
+                                    .foregroundColor(isSelected ? GhostTheme.textPrimary(scheme) : GhostTheme.textSecondary(scheme))
+                                    .lineLimit(1)
+                                Spacer(minLength: 4)
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(isSelected ? GhostTheme.elevated(scheme) : Color.clear)
+                            .cornerRadius(6)
                         }
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: tab.iconName)
-                                .font(.system(size: 13))
-                                .foregroundColor(isSelected ? GhostTheme.accent : GhostTheme.textSecondary(scheme))
-                                .frame(width: 18)
-                            Text(tab.rawValue)
-                                .font(.system(size: 13, weight: isSelected ? .medium : .regular))
-                                .foregroundColor(isSelected ? GhostTheme.textPrimary(scheme) : GhostTheme.textSecondary(scheme))
-                            Spacer()
+                        .buttonStyle(.plain)
+                    }
+                    Spacer(minLength: 0)
+
+                    if let banner = coordinator.lastStatusBanner {
+                        Divider().overlay(GhostTheme.border(scheme))
+                            .padding(.vertical, 4)
+                        HStack(alignment: .top, spacing: 6) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 11))
+                                .foregroundColor(GhostTheme.success)
+                            Text(banner)
+                                .font(GhostTheme.metadataFont)
+                                .foregroundColor(GhostTheme.textSecondary(scheme))
+                                .fixedSize(horizontal: false, vertical: true)
                         }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 7)
-                        .background(isSelected ? GhostTheme.elevated(scheme) : Color.clear)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(GhostTheme.elevated(scheme))
                         .cornerRadius(6)
                     }
-                    .buttonStyle(.plain)
                 }
-                Spacer()
+                .padding(.horizontal, 14)
+                .padding(.vertical, 14)
+                .frame(width: sidebarWidth, height: proxy.size.height)
+                .background(GhostTheme.surface(scheme))
+                .clipped()
 
-                if let banner = coordinator.lastStatusBanner {
-                    Divider().overlay(GhostTheme.border(scheme))
-                        .padding(.vertical, 4)
-                    HStack(alignment: .top, spacing: 6) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 11))
-                            .foregroundColor(GhostTheme.success)
-                        Text(banner)
-                            .font(GhostTheme.metadataFont)
-                            .foregroundColor(GhostTheme.textSecondary(scheme))
-                            .fixedSize(horizontal: false, vertical: true)
+                Divider().overlay(GhostTheme.border(scheme))
+
+                // Right settings detail pane
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        switch selectedTab {
+                        case .general: generalTab
+                        case .capture: captureTab
+                        case .categories: categoriesTab
+                        case .security: securityTab
+                        case .storage: storageTab
+                        case .developerTools: developerToolsTab
+                        case .about: aboutTab
+                        }
                     }
-                    .padding(8)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 20)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(GhostTheme.elevated(scheme))
-                    .cornerRadius(6)
                 }
+                .frame(width: detailWidth, height: proxy.size.height)
+                .background(GhostTheme.background(scheme))
+                .clipped()
             }
-            .padding(12)
-            .frame(width: 195)
-            .background(GhostTheme.surface(scheme))
-
-            Divider().overlay(GhostTheme.border(scheme))
-
-            // Right settings detail pane
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    switch selectedTab {
-                    case .general: generalTab
-                    case .capture: captureTab
-                    case .categories: categoriesTab
-                    case .security: securityTab
-                    case .storage: storageTab
-                    case .developerTools: developerToolsTab
-                    case .about: aboutTab
-                    }
-                }
-                .padding(24)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .background(GhostTheme.background(scheme))
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            .clipped()
         }
-        .frame(width: 720, height: 540)
+        .frame(minWidth: 720, idealWidth: 760, maxWidth: .infinity, minHeight: 520, idealHeight: 560, maxHeight: .infinity)
         .preferredColorScheme(coordinator.preferences.resolvedColorScheme)
         .onAppear {
             isAccessibilityTrusted = AccessibilityPasteHelper.isAccessibilityTrusted
@@ -145,6 +158,7 @@ public struct SettingsWindowView: View {
                     Text("Light").tag("light")
                     Text("System").tag("system")
                 }
+                .labelsHidden()
                 .pickerStyle(.segmented)
                 .frame(width: 240)
             }
@@ -153,7 +167,7 @@ public struct SettingsWindowView: View {
 
             // Global Shortcut Recorder Card
             VStack(alignment: .leading, spacing: 10) {
-                HStack {
+                HStack(alignment: .top, spacing: 10) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Global Floating Palette Shortcut")
                             .font(GhostTheme.bodyMedium)
@@ -161,43 +175,50 @@ public struct SettingsWindowView: View {
                         Text("Summon GhostClipboard from any application. Switch presets if you use ⌥Space for Raycast or Alfred.")
                             .font(GhostTheme.metadataFont)
                             .foregroundColor(GhostTheme.textMuted(scheme))
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    Spacer()
-                    KeycapBadge(coordinator.preferences.hotkeyDisplayString)
-                    Button(isRecordingShortcut ? "Press keys… (Esc to cancel)" : "Record Shortcut…") {
-                        if isRecordingShortcut {
-                            stopShortcutRecording()
-                        } else {
-                            startShortcutRecording()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    HStack(spacing: 8) {
+                        KeycapBadge(coordinator.preferences.hotkeyDisplayString)
+                        Button(isRecordingShortcut ? "Press keys… (Esc)" : "Record Shortcut…") {
+                            if isRecordingShortcut {
+                                stopShortcutRecording()
+                            } else {
+                                startShortcutRecording()
+                            }
                         }
+                        .controlSize(.small)
                     }
-                    .controlSize(.small)
+                    .fixedSize()
                 }
 
-                HStack(spacing: 8) {
-                    Text("Quick Presets:")
-                        .font(GhostTheme.metadataFont)
-                        .foregroundColor(GhostTheme.textMuted(scheme))
-                    ForEach(ShortcutFormatter.presets) { preset in
-                        let isActive = coordinator.preferences.hotkeyKeyCode == preset.keyCode &&
-                                       coordinator.preferences.hotkeyModifiers == preset.carbonModifiers
-                        Button {
-                            stopShortcutRecording()
-                            var updated = coordinator.preferences
-                            updated.hotkeyKeyCode = preset.keyCode
-                            updated.hotkeyModifiers = preset.carbonModifiers
-                            updated.hotkeyDisplayString = preset.displayString
-                            coordinator.preferences = updated
-                        } label: {
-                            Text(preset.title)
-                                .font(.system(size: 11, weight: isActive ? .semibold : .regular, design: .monospaced))
-                                .foregroundColor(isActive ? GhostTheme.darkBackground : GhostTheme.textSecondary(scheme))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(isActive ? GhostTheme.accent : GhostTheme.elevated(scheme))
-                                .cornerRadius(4)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        Text("Quick Presets:")
+                            .font(GhostTheme.metadataFont)
+                            .foregroundColor(GhostTheme.textMuted(scheme))
+                        ForEach(ShortcutFormatter.presets) { preset in
+                            let isActive = coordinator.preferences.hotkeyKeyCode == preset.keyCode &&
+                                           coordinator.preferences.hotkeyModifiers == preset.carbonModifiers
+                            Button {
+                                stopShortcutRecording()
+                                var updated = coordinator.preferences
+                                updated.hotkeyKeyCode = preset.keyCode
+                                updated.hotkeyModifiers = preset.carbonModifiers
+                                updated.hotkeyDisplayString = preset.displayString
+                                coordinator.preferences = updated
+                            } label: {
+                                Text(preset.title)
+                                    .font(.system(size: 11, weight: isActive ? .semibold : .regular, design: .monospaced))
+                                    .foregroundColor(isActive ? GhostTheme.darkBackground : GhostTheme.textSecondary(scheme))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(isActive ? GhostTheme.accent : GhostTheme.elevated(scheme))
+                                    .cornerRadius(4)
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                     }
                 }
             }
@@ -219,30 +240,34 @@ public struct SettingsWindowView: View {
                     .foregroundColor(GhostTheme.textMuted(scheme))
                     .fixedSize(horizontal: false, vertical: true)
 
-                HStack(spacing: 10) {
-                    Circle()
-                        .fill(isAccessibilityTrusted ? GhostTheme.success : GhostTheme.warning)
-                        .frame(width: 8, height: 8)
-                    Text(isAccessibilityTrusted ? "Accessibility Access: Granted (Direct ⌘V Paste Ready)" : "Accessibility Access: Not Granted (Copy-Only Fallback Active)")
-                        .font(GhostTheme.metadataFont)
-                        .foregroundColor(isAccessibilityTrusted ? GhostTheme.success : GhostTheme.warning)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(isAccessibilityTrusted ? GhostTheme.success : GhostTheme.warning)
+                            .frame(width: 8, height: 8)
+                        Text(isAccessibilityTrusted ? "Accessibility Access: Granted (Direct ⌘V Paste Ready)" : "Accessibility Access: Not Granted (Copy-Only Fallback Active)")
+                            .font(GhostTheme.metadataFont)
+                            .foregroundColor(isAccessibilityTrusted ? GhostTheme.success : GhostTheme.warning)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
 
-                    Spacer()
-
-                    if !isAccessibilityTrusted {
-                        Button("Request Accessibility Access") {
-                            isAccessibilityTrusted = AccessibilityPasteHelper.requestAccessibilityPermission(prompt: true)
-                            if !isAccessibilityTrusted {
-                                AccessibilityPasteHelper.openAccessibilitySystemSettings()
+                    HStack(spacing: 8) {
+                        if !isAccessibilityTrusted {
+                            Button("Request Accessibility Access") {
+                                isAccessibilityTrusted = AccessibilityPasteHelper.requestAccessibilityPermission(prompt: true)
+                                if !isAccessibilityTrusted {
+                                    AccessibilityPasteHelper.openAccessibilitySystemSettings()
+                                }
                             }
+                            .controlSize(.small)
+                        }
+
+                        Button("Refresh Status") {
+                            isAccessibilityTrusted = AccessibilityPasteHelper.isAccessibilityTrusted
                         }
                         .controlSize(.small)
+                        Spacer()
                     }
-
-                    Button("Refresh") {
-                        isAccessibilityTrusted = AccessibilityPasteHelper.isAccessibilityTrusted
-                    }
-                    .controlSize(.small)
                 }
             }
             .padding(12)
@@ -314,6 +339,7 @@ public struct SettingsWindowView: View {
                     Text("1 MB (Default)").tag(1_048_576)
                     Text("5 MB").tag(5_242_880)
                 }
+                .labelsHidden()
                 .frame(width: 160)
             }
         }
@@ -345,16 +371,20 @@ public struct SettingsWindowView: View {
                             Text(category.displayName)
                                 .font(GhostTheme.bodyMedium)
                                 .foregroundColor(isEnabled ? GhostTheme.textPrimary(scheme) : GhostTheme.textMuted(scheme))
+                                .lineLimit(1)
                             CategoryBadgeView(label: category.shortLabel, isHighlighted: isEnabled)
+                                .fixedSize()
                             Text("\(itemCount) items")
                                 .font(GhostTheme.metadataFont)
                                 .foregroundColor(GhostTheme.textMuted(scheme))
+                                .lineLimit(1)
                         }
                         Text(categoryPolicyDescription(category))
                             .font(GhostTheme.metadataFont)
                             .foregroundColor(GhostTheme.textMuted(scheme))
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    Spacer()
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
                     Button("Test Sample") {
                         _ = coordinator.ingestClipboardContent(
@@ -363,8 +393,9 @@ public struct SettingsWindowView: View {
                         )
                     }
                     .controlSize(.small)
+                    .fixedSize()
                 }
-                .padding(8)
+                .padding(10)
                 .background(GhostTheme.surface(scheme))
                 .cornerRadius(6)
             }
@@ -421,6 +452,7 @@ public struct SettingsWindowView: View {
                     Text("120 seconds (Default)").tag(120.0)
                     Text("300 seconds").tag(300.0)
                 }
+                .labelsHidden()
                 .frame(width: 180)
             }
 
@@ -446,10 +478,11 @@ public struct SettingsWindowView: View {
                     }
                 }
                 .disabled(newBundleID.trimmingCharacters(in: .whitespaces).isEmpty)
+                .fixedSize()
             }
 
             ForEach(coordinator.applicationExclusions) { rule in
-                HStack {
+                HStack(spacing: 8) {
                     Toggle("", isOn: Binding(
                         get: { rule.isEnabled },
                         set: { newValue in coordinator.setApplicationExclusion(rule, isEnabled: newValue) }
@@ -458,10 +491,14 @@ public struct SettingsWindowView: View {
 
                     Text(rule.applicationName)
                         .font(GhostTheme.bodyMedium)
+                        .lineLimit(1)
                     Text("(\(rule.bundleIdentifier))")
                         .font(GhostTheme.metadataFont)
                         .foregroundColor(GhostTheme.textMuted(scheme))
-                    Spacer()
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .layoutPriority(-1)
+                    Spacer(minLength: 4)
                     Button {
                         coordinator.removeApplicationExclusion(rule)
                     } label: {
@@ -469,8 +506,9 @@ public struct SettingsWindowView: View {
                             .foregroundColor(GhostTheme.danger)
                     }
                     .buttonStyle(.plain)
+                    .fixedSize()
                 }
-                .padding(6)
+                .padding(8)
                 .background(GhostTheme.surface(scheme))
                 .cornerRadius(4)
             }
@@ -491,9 +529,11 @@ public struct SettingsWindowView: View {
                 Text("Database Path: \(coordinator.storage.databasePath)")
                     .font(GhostTheme.codeFont)
                     .foregroundColor(GhostTheme.textSecondary(scheme))
+                    .fixedSize(horizontal: false, vertical: true)
                 Text("Stored Clips: \(stats.totalClips) (\(stats.pinnedClips) pinned) • Ephemeral: \(coordinator.ephemeralClips.count) • Blocked Secrets: \(stats.excludedEventsCount) • Size: \(formattedSize)")
                     .font(GhostTheme.metadataFont)
                     .foregroundColor(GhostTheme.textMuted(scheme))
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -502,22 +542,25 @@ public struct SettingsWindowView: View {
 
             // Live Runtime Efficiency & Telemetry Card
             VStack(alignment: .leading, spacing: 10) {
-                HStack {
+                HStack(spacing: 8) {
                     Image(systemName: "gauge.with.dots.needle.33percent")
                         .foregroundColor(GhostTheme.accent)
                     Text("RUNTIME EFFICIENCY & TELEMETRY")
                         .font(GhostTheme.badgeFont)
                         .foregroundColor(GhostTheme.accent)
-                    Spacer()
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
                     Button("Refresh Telemetry") {
                         telemetryRefreshTrigger += 1
                     }
                     .controlSize(.mini)
-                    Button("Trim Memory & Caches Now") {
+                    .fixedSize()
+                    Button("Trim Memory & Caches") {
                         coordinator.trimMemoryAndCachesNow()
                         telemetryRefreshTrigger += 1
                     }
                     .controlSize(.mini)
+                    .fixedSize()
                 }
 
                 VStack(spacing: 5) {
@@ -547,54 +590,65 @@ public struct SettingsWindowView: View {
                     Text("30 days (Default)").tag(30)
                     Text("90 days").tag(90)
                 }
+                .labelsHidden()
                 .frame(width: 170)
             }
 
             Divider().overlay(GhostTheme.border(scheme))
 
-            HStack(spacing: 12) {
-                Button("Purge Expired Clips Now") {
-                    coordinator.purgeExpiredClipsNow()
-                    telemetryRefreshTrigger += 1
-                }
-
-                Button("Backup Master Key to Keychain") {
-                    let ok = CryptoVault.shared.backupMasterKeyToKeychain()
-                    coordinator.lastStatusBanner = ok
-                        ? "Master AES-256 key backed up to macOS Keychain"
-                        : "Master key active in 0600 ~/.ghostclipboard/.vault_key"
-                }
-
-                Button("Clear Unpinned History") {
-                    coordinator.clearAllHistory(keepPinned: true)
-                    telemetryRefreshTrigger += 1
-                }
-
-                Button("Destroy All History & Logs", role: .destructive) {
-                    confirmClearHistory = true
-                }
-                .alert("Destroy All Clipboard History?", isPresented: $confirmClearHistory) {
-                    Button("Cancel", role: .cancel) {}
-                    Button("Destroy Everything", role: .destructive) {
-                        coordinator.clearAllHistory(keepPinned: false)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    Button("Purge Expired Clips Now") {
+                        coordinator.purgeExpiredClipsNow()
                         telemetryRefreshTrigger += 1
                     }
-                } message: {
-                    Text("This permanently deletes all encrypted clips, FTS indexes, and audit logs from SQLite.")
+
+                    Button("Backup Master Key to Keychain") {
+                        let ok = CryptoVault.shared.backupMasterKeyToKeychain()
+                        coordinator.lastStatusBanner = ok
+                            ? "Master AES-256 key backed up to macOS Keychain"
+                            : "Master key active in 0600 ~/.ghostclipboard/.vault_key"
+                    }
+                    Spacer(minLength: 0)
+                }
+
+                HStack(spacing: 10) {
+                    Button("Clear Unpinned History") {
+                        coordinator.clearAllHistory(keepPinned: true)
+                        telemetryRefreshTrigger += 1
+                    }
+
+                    Button("Destroy All History & Logs", role: .destructive) {
+                        confirmClearHistory = true
+                    }
+                    .alert("Destroy All Clipboard History?", isPresented: $confirmClearHistory) {
+                        Button("Cancel", role: .cancel) {}
+                        Button("Destroy Everything", role: .destructive) {
+                            coordinator.clearAllHistory(keepPinned: false)
+                            telemetryRefreshTrigger += 1
+                        }
+                    } message: {
+                        Text("This permanently deletes all encrypted clips, FTS indexes, and audit logs from SQLite.")
+                    }
+                    Spacer(minLength: 0)
                 }
             }
         }
     }
 
     private func telemetryMetricRow(_ label: String, value: String) -> some View {
-        HStack {
+        HStack(spacing: 12) {
             Text(label)
                 .font(GhostTheme.metadataFont)
                 .foregroundColor(GhostTheme.textMuted(scheme))
-            Spacer()
+                .lineLimit(1)
+            Spacer(minLength: 8)
             Text(value)
                 .font(.system(size: 11, weight: .medium, design: .monospaced))
                 .foregroundColor(GhostTheme.textPrimary(scheme))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .layoutPriority(-1)
         }
     }
 
@@ -650,6 +704,7 @@ public struct SettingsWindowView: View {
             Text("GhostClipboard is a privacy-first developer clipboard workspace for macOS. All classification, secret detection, and developer transformations run 100% locally on your Mac with zero external network calls or cloud telemetry.")
                 .font(GhostTheme.bodyFont)
                 .foregroundColor(GhostTheme.textSecondary(scheme))
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -661,6 +716,7 @@ public struct SettingsWindowView: View {
             Text(subtitle)
                 .font(GhostTheme.metadataFont)
                 .foregroundColor(GhostTheme.textMuted(scheme))
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
@@ -684,9 +740,11 @@ public struct OnboardingFlowView: View {
                         .frame(height: 4)
                 }
             }
-            .padding(20)
+            .padding(.horizontal, 24)
+            .padding(.top, 20)
+            .padding(.bottom, 12)
 
-            Spacer()
+            Spacer(minLength: 8)
 
             VStack(alignment: .leading, spacing: 14) {
                 switch currentStep {
@@ -697,7 +755,7 @@ public struct OnboardingFlowView: View {
                         subtitle: "GhostClipboard captures useful code, links, colors, JSON, and Markdown while automatically blocking passwords, API keys, and credentials before they ever touch disk."
                     )
                 case 1:
-                    VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 10) {
                         onboardingStepView(
                             icon: "lock.shield",
                             title: "2. Choose your sensitive-content posture",
@@ -729,8 +787,9 @@ public struct OnboardingFlowView: View {
                 }
             }
             .padding(.horizontal, 28)
+            .frame(maxWidth: .infinity, alignment: .leading)
 
-            Spacer()
+            Spacer(minLength: 8)
 
             Divider().overlay(GhostTheme.border(scheme))
 
@@ -753,11 +812,13 @@ public struct OnboardingFlowView: View {
                     .buttonStyle(.borderedProminent)
                 }
             }
-            .padding(16)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 16)
             .background(GhostTheme.surface(scheme))
         }
-        .frame(width: 540, height: 380)
+        .frame(width: 560, height: 400)
         .background(GhostTheme.background(scheme))
+        .clipped()
         .preferredColorScheme(coordinator.preferences.resolvedColorScheme)
     }
 
@@ -769,6 +830,7 @@ public struct OnboardingFlowView: View {
             Text(title)
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundColor(GhostTheme.textPrimary(scheme))
+                .fixedSize(horizontal: false, vertical: true)
             Text(subtitle)
                 .font(GhostTheme.bodyFont)
                 .foregroundColor(GhostTheme.textSecondary(scheme))

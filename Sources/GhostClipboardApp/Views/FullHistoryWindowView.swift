@@ -114,35 +114,51 @@ public struct FullHistoryWindowView: View {
     }
 
     public var body: some View {
-        ZStack {
-            HStack(spacing: 0) {
-                leftSidebar
-                    .frame(width: 210)
+        GeometryReader { proxy in
+            let totalWidth = max(proxy.size.width, 600)
+            let sidebarWidth = max(195, min(230, floor(totalWidth * 0.21)))
+            let middleWidth = max(260, min(360, floor(totalWidth * 0.31)))
+            let detailWidth = max(260, totalWidth - sidebarWidth - middleWidth - 2)
+            let excludedWidth = max(380, totalWidth - sidebarWidth - 1)
 
-                Divider().overlay(GhostTheme.border(scheme))
-
-                if selectedSidebar == .excluded {
-                    securityAndExcludedCenterView
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    middleClipListColumn
-                        .frame(minWidth: 320, idealWidth: 360, maxWidth: 420)
+            ZStack {
+                HStack(spacing: 0) {
+                    leftSidebar
+                        .frame(width: sidebarWidth, height: proxy.size.height)
+                        .clipped()
 
                     Divider().overlay(GhostTheme.border(scheme))
 
-                    rightInspectorColumn
-                        .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
+                    if selectedSidebar == .excluded {
+                        securityAndExcludedCenterView
+                            .frame(width: excludedWidth, height: proxy.size.height)
+                            .clipped()
+                    } else {
+                        middleClipListColumn
+                            .frame(width: middleWidth, height: proxy.size.height)
+                            .clipped()
+
+                        Divider().overlay(GhostTheme.border(scheme))
+
+                        rightInspectorColumn
+                            .frame(width: detailWidth, height: proxy.size.height)
+                            .clipped()
+                    }
+                }
+                .frame(width: proxy.size.width, height: proxy.size.height)
+                .background(GhostTheme.background(scheme))
+                .clipped()
+                .blur(radius: coordinator.preferences.isAppLocked ? 12 : 0)
+                .disabled(coordinator.preferences.isAppLocked)
+
+                if coordinator.preferences.isAppLocked {
+                    lockedOverlayView
                 }
             }
-            .background(GhostTheme.background(scheme))
-            .blur(radius: coordinator.preferences.isAppLocked ? 12 : 0)
-            .disabled(coordinator.preferences.isAppLocked)
-
-            if coordinator.preferences.isAppLocked {
-                lockedOverlayView
-            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            .clipped()
         }
-        .frame(minWidth: 960, idealWidth: 1120, minHeight: 620, idealHeight: 720)
+        .frame(minWidth: 760, idealWidth: 1100, maxWidth: .infinity, minHeight: 520, idealHeight: 700, maxHeight: .infinity)
         .preferredColorScheme(coordinator.preferences.resolvedColorScheme)
         .onAppear {
             if !coordinator.preferences.hasCompletedOnboarding {
@@ -170,20 +186,27 @@ public struct FullHistoryWindowView: View {
                     Text("GhostClipboard")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundColor(GhostTheme.textPrimary(scheme))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                     Text("Local Privacy Engine")
                         .font(.system(size: 10, weight: .regular))
                         .foregroundColor(GhostTheme.textMuted(scheme))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                 }
-                Spacer()
+                .layoutPriority(1)
+                Spacer(minLength: 4)
                 Button {
                     onTogglePalette?()
                 } label: {
                     KeycapBadge(coordinator.preferences.hotkeyDisplayString)
                 }
                 .buttonStyle(.plain)
+                .fixedSize()
                 .help("Toggle Floating Palette (\(coordinator.preferences.hotkeyDisplayString))")
             }
-            .padding(14)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
 
             Divider().overlay(GhostTheme.border(scheme))
 
@@ -192,7 +215,8 @@ public struct FullHistoryWindowView: View {
                     Text("WORKSPACE")
                         .font(GhostTheme.badgeFont)
                         .foregroundColor(GhostTheme.textMuted(scheme))
-                        .padding(.horizontal, 10)
+                        .lineLimit(1)
+                        .padding(.horizontal, 12)
                         .padding(.top, 8)
                         .padding(.bottom, 2)
 
@@ -203,7 +227,8 @@ public struct FullHistoryWindowView: View {
                     Text("CATEGORIES")
                         .font(GhostTheme.badgeFont)
                         .foregroundColor(GhostTheme.textMuted(scheme))
-                        .padding(.horizontal, 10)
+                        .lineLimit(1)
+                        .padding(.horizontal, 12)
                         .padding(.top, 12)
                         .padding(.bottom, 2)
 
@@ -214,7 +239,8 @@ public struct FullHistoryWindowView: View {
                     Text("SECURITY & RETENTION")
                         .font(GhostTheme.badgeFont)
                         .foregroundColor(GhostTheme.textMuted(scheme))
-                        .padding(.horizontal, 10)
+                        .lineLimit(1)
+                        .padding(.horizontal, 12)
                         .padding(.top, 12)
                         .padding(.bottom, 2)
 
@@ -222,10 +248,11 @@ public struct FullHistoryWindowView: View {
                         sidebarRow(item)
                     }
                 }
-                .padding(8)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
             }
 
-            Spacer()
+            Spacer(minLength: 0)
             Divider().overlay(GhostTheme.border(scheme))
 
             // Sidebar Footer Controls
@@ -235,24 +262,28 @@ public struct FullHistoryWindowView: View {
                         .font(GhostTheme.metadataFont)
                         .foregroundColor(GhostTheme.accent)
                         .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
-                HStack {
+                HStack(spacing: 8) {
                     Button {
                         coordinator.preferences.monitoringPaused.toggle()
                     } label: {
-                        HStack(spacing: 5) {
+                        HStack(spacing: 6) {
                             Circle()
                                 .fill(coordinator.preferences.monitoringPaused ? GhostTheme.warning : GhostTheme.success)
                                 .frame(width: 7, height: 7)
                             Text(coordinator.preferences.monitoringPaused ? "Monitoring Paused" : "Monitoring Active")
                                 .font(GhostTheme.metadataFont)
                                 .foregroundColor(GhostTheme.textSecondary(scheme))
+                                .lineLimit(1)
+                                .truncationMode(.tail)
                         }
                     }
                     .buttonStyle(.plain)
 
-                    Spacer()
+                    Spacer(minLength: 4)
 
                     Button {
                         coordinator.preferences.isAppLocked = true
@@ -275,7 +306,8 @@ public struct FullHistoryWindowView: View {
                     .help("Open Settings")
                 }
             }
-            .padding(12)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
             .background(GhostTheme.surface(scheme))
         }
         .background(GhostTheme.surface(scheme))
@@ -297,8 +329,10 @@ public struct FullHistoryWindowView: View {
                 Text(item.rawValue)
                     .font(.system(size: 13, weight: isSelected ? .medium : .regular))
                     .foregroundColor(isSelected ? GhostTheme.textPrimary(scheme) : GhostTheme.textSecondary(scheme))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
 
-                Spacer()
+                Spacer(minLength: 4)
 
                 if count > 0 {
                     Text("\(count)")
@@ -308,9 +342,10 @@ public struct FullHistoryWindowView: View {
                         .padding(.vertical, 1)
                         .background(GhostTheme.elevated(scheme))
                         .cornerRadius(4)
+                        .fixedSize()
                 }
             }
-            .padding(.horizontal, 10)
+            .padding(.horizontal, 12)
             .padding(.vertical, 6)
             .background(isSelected ? GhostTheme.elevated(scheme) : Color.clear)
             .cornerRadius(6)
@@ -380,64 +415,47 @@ public struct FullHistoryWindowView: View {
                         manualIngestPopover
                     }
                 }
-                .padding(8)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
                 .background(GhostTheme.elevated(scheme))
                 .cornerRadius(6)
 
-                HStack(spacing: 8) {
-                    Text("\(clips.count) items")
-                        .font(GhostTheme.metadataFont)
-                        .foregroundColor(GhostTheme.textMuted(scheme))
-
-                    Spacer()
-
-                    Button {
-                        _ = coordinator.generateAndCopyUUID()
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "number.square")
-                                .font(.system(size: 11))
-                            Text("UUID v4")
-                                .font(GhostTheme.metadataFont)
-                        }
-                        .foregroundColor(GhostTheme.accent)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(GhostTheme.elevated(scheme))
-                        .cornerRadius(4)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Generate a fresh UUID v4 and copy to clipboard")
-
-                    Menu {
-                        Button("Copy Merged Pinned Clips") {
-                            _ = coordinator.copyMergedClips(pinnedOnly: true)
-                        }
-                        Button("Copy Merged Top 5 Recent Clips") {
-                            _ = coordinator.copyMergedClips(pinnedOnly: false, limit: 5)
-                        }
-                        Button("Copy Merged Top 3 (Single-Line Space Separated)") {
-                            _ = coordinator.copyMergedClips(pinnedOnly: false, limit: 3, separator: " ")
-                        }
-                    } label: {
-                        Label("Stack", systemImage: "square.stack.3d.up")
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 6) {
+                        Text("\(clips.count) items")
                             .font(GhostTheme.metadataFont)
-                    }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                    .help("Paste Stack: Merge multiple pinned or recent clips")
+                            .foregroundColor(GhostTheme.textMuted(scheme))
+                            .lineLimit(1)
 
-                    Picker("Sort", selection: $sortOrder) {
-                        ForEach(ClipSortOrder.allCases) { order in
-                            Text(order.rawValue).tag(order)
+                        Spacer(minLength: 4)
+
+                        uuidQuickButton
+                        pasteStackMenu
+                        sortPickerControl
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 6) {
+                            Text("\(clips.count) items")
+                                .font(GhostTheme.metadataFont)
+                                .foregroundColor(GhostTheme.textMuted(scheme))
+                                .lineLimit(1)
+                            Spacer(minLength: 4)
+                            uuidQuickButton
+                            pasteStackMenu
+                        }
+                        HStack {
+                            Text("Sort:")
+                                .font(GhostTheme.metadataFont)
+                                .foregroundColor(GhostTheme.textMuted(scheme))
+                            sortPickerControl
+                            Spacer(minLength: 0)
                         }
                     }
-                    .pickerStyle(.menu)
-                    .controlSize(.small)
-                    .frame(width: 135)
                 }
             }
-            .padding(12)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
             .background(GhostTheme.surface(scheme))
 
             Divider().overlay(GhostTheme.border(scheme))
@@ -450,11 +468,13 @@ public struct FullHistoryWindowView: View {
                     Text("No clips in \(selectedSidebar.rawValue)")
                         .font(GhostTheme.bodyMedium)
                         .foregroundColor(GhostTheme.textSecondary(scheme))
+                        .multilineTextAlignment(.center)
                 }
+                .padding(16)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 4) {
+                    LazyVStack(spacing: 6) {
                         ForEach(clips) { clip in
                             let isSelected = (selectedClip?.id == clip.id)
                             historyClipCard(clip: clip, isSelected: isSelected)
@@ -475,11 +495,67 @@ public struct FullHistoryWindowView: View {
                                 }
                         }
                     }
-                    .padding(8)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
                 }
             }
         }
         .background(GhostTheme.background(scheme))
+    }
+
+    private var uuidQuickButton: some View {
+        Button {
+            _ = coordinator.generateAndCopyUUID()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "number.square")
+                    .font(.system(size: 11))
+                Text("UUID")
+                    .font(GhostTheme.metadataFont)
+                    .lineLimit(1)
+            }
+            .foregroundColor(GhostTheme.accent)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(GhostTheme.elevated(scheme))
+            .cornerRadius(4)
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .help("Generate a fresh UUID v4 and copy to clipboard")
+    }
+
+    private var pasteStackMenu: some View {
+        Menu {
+            Button("Copy Merged Pinned Clips") {
+                _ = coordinator.copyMergedClips(pinnedOnly: true)
+            }
+            Button("Copy Merged Top 5 Recent Clips") {
+                _ = coordinator.copyMergedClips(pinnedOnly: false, limit: 5)
+            }
+            Button("Copy Merged Top 3 (Single-Line Space Separated)") {
+                _ = coordinator.copyMergedClips(pinnedOnly: false, limit: 3, separator: " ")
+            }
+        } label: {
+            Label("Stack", systemImage: "square.stack.3d.up")
+                .font(GhostTheme.metadataFont)
+                .lineLimit(1)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Paste Stack: Merge multiple pinned or recent clips")
+    }
+
+    private var sortPickerControl: some View {
+        Picker("", selection: $sortOrder) {
+            ForEach(ClipSortOrder.allCases) { order in
+                Text(order.rawValue).tag(order)
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.menu)
+        .controlSize(.small)
+        .frame(width: 112)
     }
 
     private func historyClipCard(clip: ClipItem, isSelected: Bool) -> some View {
@@ -499,9 +575,11 @@ public struct FullHistoryWindowView: View {
                     label: clip.detectedLanguage?.shortBadge ?? clip.primaryCategory.shortLabel,
                     isHighlighted: isSelected
                 )
+                .fixedSize()
 
                 if clip.isEphemeral {
                     CategoryBadgeView(label: "EPHEMERAL", isHighlighted: false)
+                        .fixedSize()
                 }
 
                 if let app = clip.sourceApplication {
@@ -509,9 +587,11 @@ public struct FullHistoryWindowView: View {
                         .font(GhostTheme.metadataFont)
                         .foregroundColor(GhostTheme.textMuted(scheme))
                         .lineLimit(1)
+                        .truncationMode(.tail)
+                        .layoutPriority(-1)
                 }
 
-                Spacer()
+                Spacer(minLength: 4)
 
                 if clip.isPinned {
                     Image(systemName: "pin.fill")
@@ -522,15 +602,19 @@ public struct FullHistoryWindowView: View {
                 Text(clip.createdAt, style: .relative)
                     .font(GhostTheme.metadataFont)
                     .foregroundColor(GhostTheme.textMuted(scheme))
+                    .lineLimit(1)
+                    .layoutPriority(-1)
             }
 
             Text(clip.isSensitiveOrEphemeral ? clip.maskedPreview : clip.contentPreview)
                 .font(clip.primaryCategory == .code || clip.primaryCategory == .json || clip.primaryCategory == .terminalCommand ? GhostTheme.codeFont : GhostTheme.bodyFont)
                 .foregroundColor(GhostTheme.textPrimary(scheme))
                 .lineLimit(2)
+                .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(10)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
         .background(isSelected ? GhostTheme.elevated(scheme) : GhostTheme.surface(scheme))
         .overlay(
             RoundedRectangle(cornerRadius: 6)
@@ -553,7 +637,9 @@ public struct FullHistoryWindowView: View {
                 Text("Select a clip to inspect contents and developer actions")
                     .font(GhostTheme.bodyFont)
                     .foregroundColor(GhostTheme.textMuted(scheme))
+                    .multilineTextAlignment(.center)
             }
+            .padding(24)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(GhostTheme.surface(scheme))
         }
@@ -571,6 +657,7 @@ public struct FullHistoryWindowView: View {
                     Text("Your clipboard remembers. Your secrets disappear. Sensitive items are evaluated before persistence and never touch the SQLite history database.")
                         .font(GhostTheme.bodyFont)
                         .foregroundColor(GhostTheme.textSecondary(scheme))
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 // Active Security Posture Cards
@@ -600,15 +687,18 @@ public struct FullHistoryWindowView: View {
 
                 // Excluded Capture Audit Log (Never contains secret values!)
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack {
+                    HStack(spacing: 8) {
                         Text("EXCLUDED CAPTURE EVENTS (NON-SENSITIVE AUDIT LOG)")
                             .font(GhostTheme.badgeFont)
                             .foregroundColor(GhostTheme.textMuted(scheme))
-                        Spacer()
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Spacer(minLength: 8)
                         Button("Clear System Clipboard Now") {
                             coordinator.clearSystemClipboard()
                         }
                         .font(GhostTheme.metadataFont)
+                        .fixedSize()
                     }
 
                     if coordinator.excludedEvents.isEmpty {
@@ -626,18 +716,23 @@ public struct FullHistoryWindowView: View {
                                         Text(event.secretType)
                                             .font(GhostTheme.bodyMedium)
                                             .foregroundColor(GhostTheme.textPrimary(scheme))
+                                            .lineLimit(1)
                                         CategoryBadgeView(label: event.sensitivityLevel.badgeText)
+                                            .fixedSize()
                                     }
                                     Text("\(event.reason) • Source: \(event.sourceApplication ?? "System")")
                                         .font(GhostTheme.metadataFont)
                                         .foregroundColor(GhostTheme.textMuted(scheme))
+                                        .fixedSize(horizontal: false, vertical: true)
                                 }
-                                Spacer()
+                                Spacer(minLength: 8)
                                 Text(event.timestamp, style: .relative)
                                     .font(GhostTheme.metadataFont)
                                     .foregroundColor(GhostTheme.textMuted(scheme))
+                                    .lineLimit(1)
+                                    .fixedSize()
                             }
-                            .padding(10)
+                            .padding(12)
                             .background(GhostTheme.surface(scheme))
                             .overlay(
                                 RoundedRectangle(cornerRadius: 6)
@@ -648,26 +743,33 @@ public struct FullHistoryWindowView: View {
                     }
                 }
             }
-            .padding(24)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 20)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(GhostTheme.background(scheme))
     }
 
     private func securityStatCard(title: String, value: String, subtitle: String, icon: String, color: Color) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
+            HStack(spacing: 6) {
                 Image(systemName: icon)
                     .foregroundColor(color)
                 Text(title)
                     .font(GhostTheme.metadataFont)
                     .foregroundColor(GhostTheme.textSecondary(scheme))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
             Text(value)
                 .font(.system(size: 22, weight: .bold, design: .monospaced))
                 .foregroundColor(GhostTheme.textPrimary(scheme))
+                .lineLimit(1)
             Text(subtitle)
                 .font(GhostTheme.metadataFont)
                 .foregroundColor(GhostTheme.textMuted(scheme))
+                .lineLimit(1)
+                .truncationMode(.tail)
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)

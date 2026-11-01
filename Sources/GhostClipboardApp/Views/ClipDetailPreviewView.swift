@@ -46,10 +46,14 @@ public struct ClipDetailPreviewView: View {
                     metadataGridSection
                     developerActionsSection
                 }
-                .padding(16)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 16)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(GhostTheme.surface(scheme))
+        .clipped()
         .onAppear {
             now = Date()
             showFormattedJSON = coordinator.preferences.autoFormatJSONPreview
@@ -90,22 +94,27 @@ public struct ClipDetailPreviewView: View {
                     Text(clip.primaryCategory.displayName)
                         .font(GhostTheme.titleFont)
                         .foregroundColor(GhostTheme.textPrimary(scheme))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
 
                     if let lang = clip.detectedLanguage {
                         CategoryBadgeView(label: lang.rawValue, isHighlighted: true)
+                            .fixedSize()
                     }
 
                     if clip.isPinned {
                         CategoryBadgeView(label: "PINNED", isHighlighted: false)
+                            .fixedSize()
                     }
                 }
 
                 Text(headerSubtitle)
                     .font(GhostTheme.metadataFont)
                     .foregroundColor(GhostTheme.textMuted(scheme))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
-
-            Spacer()
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             // Category override menu (Section 5.2)
             Menu {
@@ -131,6 +140,7 @@ public struct ClipDetailPreviewView: View {
                     .foregroundColor(clip.isPinned ? GhostTheme.accent : GhostTheme.textSecondary(scheme))
             }
             .buttonStyle(.plain)
+            .fixedSize()
             .help(clip.isPinned ? "Unpin clip" : "Pin clip to prevent expiration")
             .disabled(clip.isEphemeral)
 
@@ -150,8 +160,10 @@ public struct ClipDetailPreviewView: View {
                 .cornerRadius(4)
             }
             .buttonStyle(.plain)
+            .fixedSize()
         }
-        .padding(12)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
         .background(GhostTheme.background(scheme))
     }
 
@@ -196,10 +208,12 @@ public struct ClipDetailPreviewView: View {
                 Text(clip.detectedLanguage?.rawValue ?? "Code Snippet")
                     .font(GhostTheme.metadataFont)
                     .foregroundColor(GhostTheme.textSecondary(scheme))
+                    .lineLimit(1)
                 Spacer()
                 Text("\(clip.lineCount) lines • \(clip.characterCount) chars")
                     .font(GhostTheme.metadataFont)
                     .foregroundColor(GhostTheme.textMuted(scheme))
+                    .lineLimit(1)
             }
 
             let lines = clip.content.components(separatedBy: .newlines)
@@ -264,7 +278,7 @@ public struct ClipDetailPreviewView: View {
                     colorValueRow(label: "RGB", value: colorComp.rgbString)
                     colorValueRow(label: "HSL", value: colorComp.hslString)
                 }
-                Spacer()
+                Spacer(minLength: 0)
             }
             .padding(12)
             .background(GhostTheme.background(scheme))
@@ -285,6 +299,7 @@ public struct ClipDetailPreviewView: View {
             Text(value)
                 .font(GhostTheme.codeFont)
                 .foregroundColor(GhostTheme.textPrimary(scheme))
+                .lineLimit(1)
                 .textSelection(.enabled)
             Button {
                 coordinator.copyToSystemClipboard(value)
@@ -308,6 +323,7 @@ public struct ClipDetailPreviewView: View {
                     Text("Domain safety warning: This URL uses an uncommon TLD, punycode, or embedded authority.")
                         .font(GhostTheme.metadataFont)
                         .foregroundColor(GhostTheme.warning)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -316,13 +332,15 @@ public struct ClipDetailPreviewView: View {
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                HStack {
+                HStack(spacing: 8) {
                     Image(systemName: "globe")
                         .foregroundColor(GhostTheme.accent)
                     Text(clip.urlHostname ?? "URL")
                         .font(GhostTheme.bodyMedium)
                         .foregroundColor(GhostTheme.textPrimary(scheme))
-                    Spacer()
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 8)
                     if let url = URL(string: clip.content.trimmingCharacters(in: .whitespacesAndNewlines)),
                        let schemeStr = url.scheme?.lowercased(),
                        (schemeStr == "http" || schemeStr == "https") {
@@ -334,12 +352,14 @@ public struct ClipDetailPreviewView: View {
                                 .foregroundColor(GhostTheme.accent)
                         }
                         .buttonStyle(.plain)
+                        .fixedSize()
                     }
                 }
 
                 Text(clip.content)
                     .font(GhostTheme.codeFont)
                     .foregroundColor(GhostTheme.textSecondary(scheme))
+                    .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -360,13 +380,15 @@ public struct ClipDetailPreviewView: View {
                 Text("Markdown Preview")
                     .font(GhostTheme.metadataFont)
                     .foregroundColor(GhostTheme.textSecondary(scheme))
+                    .lineLimit(1)
                 Spacer()
                 Picker("", selection: $showRenderedMarkdown) {
                     Text("Rendered").tag(true)
                     Text("Raw Source").tag(false)
                 }
+                .labelsHidden()
                 .pickerStyle(.segmented)
-                .frame(width: 180)
+                .frame(width: 170)
             }
 
             VStack(alignment: .leading, spacing: 6) {
@@ -378,6 +400,7 @@ public struct ClipDetailPreviewView: View {
                     Text(clip.content)
                         .font(GhostTheme.codeFont)
                         .foregroundColor(GhostTheme.textPrimary(scheme))
+                        .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
                 }
             }
@@ -399,24 +422,28 @@ public struct ClipDetailPreviewView: View {
             Text(inlineMarkdown(String(trimmed.dropFirst(2))))
                 .font(.system(size: 16, weight: .bold))
                 .foregroundColor(GhostTheme.textPrimary(scheme))
+                .fixedSize(horizontal: false, vertical: true)
         } else if trimmed.hasPrefix("## ") {
             Text(inlineMarkdown(String(trimmed.dropFirst(3))))
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(GhostTheme.textPrimary(scheme))
+                .fixedSize(horizontal: false, vertical: true)
         } else if trimmed.hasPrefix("### ") {
             Text(inlineMarkdown(String(trimmed.dropFirst(4))))
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(GhostTheme.accent)
+                .fixedSize(horizontal: false, vertical: true)
         } else if trimmed.hasPrefix("- [x] ") || trimmed.hasPrefix("- [X] ") {
             Button {
                 toggleMarkdownCheckbox(at: lineIndex, currentlyChecked: true)
             } label: {
-                HStack(spacing: 6) {
+                HStack(alignment: .top, spacing: 6) {
                     Image(systemName: "checkmark.square.fill")
                         .foregroundColor(GhostTheme.success)
                     Text(inlineMarkdown(String(trimmed.dropFirst(6))))
                         .font(GhostTheme.bodyFont)
                         .foregroundColor(GhostTheme.textSecondary(scheme))
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .buttonStyle(.plain)
@@ -424,12 +451,13 @@ public struct ClipDetailPreviewView: View {
             Button {
                 toggleMarkdownCheckbox(at: lineIndex, currentlyChecked: false)
             } label: {
-                HStack(spacing: 6) {
+                HStack(alignment: .top, spacing: 6) {
                     Image(systemName: "square")
                         .foregroundColor(GhostTheme.textMuted(scheme))
                     Text(inlineMarkdown(String(trimmed.dropFirst(6))))
                         .font(GhostTheme.bodyFont)
                         .foregroundColor(GhostTheme.textPrimary(scheme))
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .buttonStyle(.plain)
@@ -440,6 +468,7 @@ public struct ClipDetailPreviewView: View {
                 Text(inlineMarkdown(String(trimmed.dropFirst(2))))
                     .font(GhostTheme.bodyFont)
                     .foregroundColor(GhostTheme.textPrimary(scheme))
+                    .fixedSize(horizontal: false, vertical: true)
             }
         } else if trimmed.hasPrefix("> ") {
             HStack(spacing: 8) {
@@ -449,11 +478,13 @@ public struct ClipDetailPreviewView: View {
                 Text(inlineMarkdown(String(trimmed.dropFirst(2))))
                     .font(GhostTheme.bodyFont.italic())
                     .foregroundColor(GhostTheme.textSecondary(scheme))
+                    .fixedSize(horizontal: false, vertical: true)
             }
         } else {
             Text(inlineMarkdown(line))
                 .font(GhostTheme.bodyFont)
                 .foregroundColor(GhostTheme.textPrimary(scheme))
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -487,19 +518,22 @@ public struct ClipDetailPreviewView: View {
         }()
 
         return VStack(alignment: .leading, spacing: 8) {
-            HStack {
+            HStack(spacing: 8) {
                 HStack(spacing: 6) {
                     Image(systemName: validation.isValid ? "checkmark.circle.fill" : "xmark.octagon.fill")
                         .foregroundColor(validation.isValid ? GhostTheme.success : GhostTheme.danger)
                     Text(validation.message)
                         .font(GhostTheme.metadataFont)
                         .foregroundColor(validation.isValid ? GhostTheme.success : GhostTheme.danger)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 }
-                Spacer()
+                Spacer(minLength: 8)
                 Toggle("Formatted", isOn: $showFormattedJSON)
                     .toggleStyle(.switch)
                     .controlSize(.mini)
                     .font(GhostTheme.metadataFont)
+                    .fixedSize()
             }
 
             Group {
@@ -511,6 +545,7 @@ public struct ClipDetailPreviewView: View {
                         .foregroundColor(GhostTheme.textPrimary(scheme))
                 }
             }
+            .fixedSize(horizontal: false, vertical: true)
             .textSelection(.enabled)
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -533,6 +568,7 @@ public struct ClipDetailPreviewView: View {
                     Text(warning)
                         .font(GhostTheme.metadataFont)
                         .foregroundColor(GhostTheme.danger)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -547,6 +583,7 @@ public struct ClipDetailPreviewView: View {
                 Text(clip.content)
                     .font(GhostTheme.codeFont)
                     .foregroundColor(GhostTheme.textPrimary(scheme))
+                    .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
             }
             .padding(12)
@@ -565,6 +602,7 @@ public struct ClipDetailPreviewView: View {
         Text(clip.content)
             .font(GhostTheme.bodyFont)
             .foregroundColor(GhostTheme.textPrimary(scheme))
+            .fixedSize(horizontal: false, vertical: true)
             .textSelection(.enabled)
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -585,6 +623,7 @@ public struct ClipDetailPreviewView: View {
                 Text(clip.sensitivityLevel.displayName)
                     .font(GhostTheme.bodyMedium)
                     .foregroundColor(GhostTheme.warning)
+                    .lineLimit(1)
                 Spacer()
                 if let rem = clip.remainingSeconds(at: now) {
                     Text("Expires in \(Int(rem))s")
@@ -594,12 +633,14 @@ public struct ClipDetailPreviewView: View {
                         .padding(.vertical, 2)
                         .background(GhostTheme.danger.opacity(0.15))
                         .cornerRadius(4)
+                        .fixedSize()
                 }
             }
 
             Text(isRevealed ? clip.content : clip.maskedPreview)
                 .font(GhostTheme.codeFont)
                 .foregroundColor(GhostTheme.textPrimary(scheme))
+                .fixedSize(horizontal: false, vertical: true)
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(GhostTheme.background(scheme))
@@ -655,9 +696,11 @@ public struct ClipDetailPreviewView: View {
                 Text("DECODED JWT INSPECTOR")
                     .font(GhostTheme.badgeFont)
                     .foregroundColor(GhostTheme.accent)
+                    .lineLimit(1)
 
                 if let alg = jwt.algorithm {
                     CategoryBadgeView(label: alg, isHighlighted: true)
+                        .fixedSize()
                 }
 
                 if let isExp = jwt.isExpired {
@@ -668,43 +711,31 @@ public struct ClipDetailPreviewView: View {
                         .padding(.vertical, 2)
                         .background((isExp ? GhostTheme.danger : GhostTheme.success).opacity(0.15))
                         .cornerRadius(4)
+                        .fixedSize()
                 }
 
-                Spacer()
+                Spacer(minLength: 4)
 
                 Button {
                     coordinator.copyToSystemClipboard(jwt.combinedFormatted, markClipID: clip.id)
                     lastActionFeedback = "Copied decoded JWT JSON"
                 } label: {
-                    Label("Copy Decoded JSON", systemImage: "doc.on.doc")
+                    Label("Copy JSON", systemImage: "doc.on.doc")
                         .font(GhostTheme.metadataFont)
                         .foregroundColor(GhostTheme.accent)
                 }
                 .buttonStyle(.plain)
+                .fixedSize()
             }
 
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("HEADER")
-                        .font(GhostTheme.badgeFont)
-                        .foregroundColor(GhostTheme.textMuted(scheme))
-                    Text(SyntaxHighlighter.highlight(jwt.headerJSON, language: .javascript, scheme: scheme))
-                        .textSelection(.enabled)
-                        .padding(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(GhostTheme.surface(scheme))
-                        .cornerRadius(4)
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 12) {
+                    jwtCodeBlock(title: "HEADER", json: jwt.headerJSON)
+                    jwtCodeBlock(title: "CLAIMS PAYLOAD", json: jwt.claimsJSON)
                 }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("CLAIMS PAYLOAD")
-                        .font(GhostTheme.badgeFont)
-                        .foregroundColor(GhostTheme.textMuted(scheme))
-                    Text(SyntaxHighlighter.highlight(jwt.claimsJSON, language: .javascript, scheme: scheme))
-                        .textSelection(.enabled)
-                        .padding(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(GhostTheme.surface(scheme))
-                        .cornerRadius(4)
+                VStack(alignment: .leading, spacing: 10) {
+                    jwtCodeBlock(title: "HEADER", json: jwt.headerJSON)
+                    jwtCodeBlock(title: "CLAIMS PAYLOAD", json: jwt.claimsJSON)
                 }
             }
         }
@@ -717,6 +748,22 @@ public struct ClipDetailPreviewView: View {
         .cornerRadius(6)
     }
 
+    private func jwtCodeBlock(title: String, json: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(GhostTheme.badgeFont)
+                .foregroundColor(GhostTheme.textMuted(scheme))
+            Text(SyntaxHighlighter.highlight(json, language: .javascript, scheme: scheme))
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(GhostTheme.surface(scheme))
+                .cornerRadius(4)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     private func timestampInspectorCard(_ ts: TimestampInfo) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -725,6 +772,7 @@ public struct ClipDetailPreviewView: View {
                 Text("TIMESTAMP CONVERTER")
                     .font(GhostTheme.badgeFont)
                     .foregroundColor(GhostTheme.accent)
+                    .lineLimit(1)
                 Spacer()
                 Button {
                     coordinator.copyToSystemClipboard(ts.iso8601UTC, markClipID: clip.id)
@@ -735,6 +783,7 @@ public struct ClipDetailPreviewView: View {
                         .foregroundColor(GhostTheme.accent)
                 }
                 .buttonStyle(.plain)
+                .fixedSize()
             }
 
             metadataRow("UTC Time", value: ts.humanUTC)
@@ -742,7 +791,7 @@ public struct ClipDetailPreviewView: View {
             metadataRow("ISO-8601", value: ts.iso8601UTC)
             metadataRow("Unix Epoch", value: "\(ts.epochSeconds)s (\(ts.epochMilliseconds)ms)")
         }
-        .padding(10)
+        .padding(12)
         .background(GhostTheme.background(scheme))
         .overlay(
             RoundedRectangle(cornerRadius: 6)
@@ -769,7 +818,7 @@ public struct ClipDetailPreviewView: View {
                 metadataRow("Sensitivity Policy", value: clip.sensitivityLevel.displayName)
                 metadataRow("Retention Policy", value: retentionDescription)
             }
-            .padding(10)
+            .padding(12)
             .background(GhostTheme.background(scheme))
             .overlay(
                 RoundedRectangle(cornerRadius: 6)
@@ -794,15 +843,18 @@ public struct ClipDetailPreviewView: View {
     }
 
     private func metadataRow(_ label: String, value: String) -> some View {
-        HStack {
+        HStack(spacing: 12) {
             Text(label)
                 .font(GhostTheme.metadataFont)
                 .foregroundColor(GhostTheme.textMuted(scheme))
-            Spacer()
+                .lineLimit(1)
+            Spacer(minLength: 8)
             Text(value)
                 .font(GhostTheme.metadataFont)
                 .foregroundColor(GhostTheme.textSecondary(scheme))
                 .lineLimit(1)
+                .truncationMode(.tail)
+                .layoutPriority(-1)
         }
     }
 
@@ -811,15 +863,19 @@ public struct ClipDetailPreviewView: View {
     private var developerActionsSection: some View {
         let actions = coordinator.actionsEngine.availableActions(for: clip)
         return VStack(alignment: .leading, spacing: 8) {
-            HStack {
+            HStack(spacing: 8) {
                 Text("DEVELOPER ACTIONS")
                     .font(GhostTheme.badgeFont)
                     .foregroundColor(GhostTheme.textMuted(scheme))
-                Spacer()
+                    .lineLimit(1)
+                Spacer(minLength: 8)
                 if let feedback = lastActionFeedback {
                     Text(feedback)
                         .font(GhostTheme.metadataFont)
                         .foregroundColor(GhostTheme.success)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .layoutPriority(-1)
                 }
             }
 
@@ -835,13 +891,15 @@ public struct ClipDetailPreviewView: View {
                             Text(action.title)
                                 .font(GhostTheme.bodyMedium)
                                 .foregroundColor(action.isWarning ? GhostTheme.warning : GhostTheme.textPrimary(scheme))
+                                .lineLimit(1)
+                                .truncationMode(.tail)
                             Text(action.summaryMessage)
                                 .font(GhostTheme.metadataFont)
                                 .foregroundColor(GhostTheme.textMuted(scheme))
                                 .lineLimit(1)
+                                .truncationMode(.tail)
                         }
-
-                        Spacer()
+                        .frame(maxWidth: .infinity, alignment: .leading)
 
                         if let transformed = action.transformedContent {
                             Button {
@@ -857,9 +915,10 @@ public struct ClipDetailPreviewView: View {
                                     .cornerRadius(4)
                             }
                             .buttonStyle(.plain)
+                            .fixedSize()
                         }
                     }
-                    .padding(8)
+                    .padding(10)
                     .background(GhostTheme.background(scheme))
                     .overlay(
                         RoundedRectangle(cornerRadius: 6)
