@@ -1,0 +1,667 @@
+import SwiftUI
+import AppKit
+import GhostClipboardCore
+
+/// Section 7.3.3 Category Strip Tabs
+public enum PaletteTab: String, CaseIterable, Identifiable {
+    case all = "All"
+    case code = "Code"
+    case links = "Links"
+    case colors = "Colors"
+    case markdown = "Markdown"
+    case json = "JSON"
+    case temporary = "Temporary"
+    case saved = "Saved"
+
+    public var id: String { rawValue }
+}
+
+public struct FloatingPaletteView: View {
+    @ObservedObject public var coordinator: ClipboardCoordinator
+    public var onOpenFullHistory: () -> Void
+    public var onOpenSettings: () -> Void
+    public var onDismiss: () -> Void
+
+    @Environment(\.colorScheme) private var scheme
+    @FocusState private var isSearchFocused: Bool
+
+    @State private var selectedTab: PaletteTab = .all
+    @State private var selectedIndex: Int = 0
+    @State private var showActionMenu: Bool = false
+    @State private var now: Date = Date()
+    @State private var keyMonitor: Any? = nil
+
+    private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    public init(
+        coordinator: ClipboardCoordinator,
+        onOpenFullHistory: @escaping () -> Void,
+        onOpenSettings: @escaping () -> Void,
+        onDismiss: @escaping () -> Void
+    ) {
+        self.coordinator = coordinator
+        self.onOpenFullHistory = onOpenFullHistory
+        self.onOpenSettings = onOpenSettings
+        self.onDismiss = onDismiss
+    }
+
+    private var filteredClips: [ClipItem] {
+        let base = coordinator.allVisibleClips
+        switch selectedTab {
+        case .all:
+            return base
+        case .code:
+            return base.filter { $0.primaryCategory == .code || $0.primaryCategory == .terminalCommand }
+        case .links:
+            return base.filter { $0.primaryCategory == .url }
+        case .colors:
+            return base.filter { $0.primaryCategory == .hexColor }
+        case .markdown:
+            return base.filter { $0.primaryCategory == .markdown }
+        case .json:
+            return base.filter { $0.primaryCategory == .json }
+        case .temporary:
+            return base.filter { $0.isEphemeral || $0.sensitivityLevel != .normal }
+        case .saved:
+            return base.filter { $0.isPinned || $0.isFavorite }
+        }
+    }
+
+    private var selectedClip: ClipItem? {
+        let clips = filteredClips
+        guard !clips.isEmpty, selectedIndex >= 0, selectedIndex < clips.count else {
+            return clips.first
+        }
+        return clips[selectedIndex]
+    }
+
+    public var body: some View {
+        VStack(spacing: 0) {
+            headerBar
+            Divider().overlay(GhostTheme.border(scheme))
+
+            categoryStrip
+            Divider().overlay(GhostTheme.border(scheme))
+
+            mainSplitContent
+            Divider().overlay(GhostTheme.border(scheme))
+
+            footerBar
+        }
+        // Section 7.3.1: Default 640x480, min 520, max 760
+        .frame(minWidth: 520, idealWidth: 640, maxWidth: 760, minHeight: 420, idealHeight: 480, maxHeight: 600)
+        .background(GhostTheme.background(scheme))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(GhostTheme.border(scheme), lineWidth: 1)
+        )
+        .cornerRadius(10)
+        .preferredColorScheme(coordinator.preferences.resolvedColorScheme)
+        .onAppear {
+            isSearchFocused = true
+            selectedIndex = 0
+            installKeyMonitor()
+        }
+        .onDisappear {
+            removeKeyMonitor()
+        }
+        .onChange(of: coordinator.searchQuery) { _ in
+            selectedIndex = 0
+            coordinator.reloadClips()
+        }
+        .onChange(of: selectedTab) { _ in
+            selectedIndex = 0
+        }
+        .onReceive(timer) { tick in
+            now = tick
+        }
+        .sheet(isPresented: $showActionMenu) {
+            if let clip = selectedClip {
+                actionMenuSheet(for: clip)
+            }
+        }
+    }
+
+    private func installKeyMonitor() {
+        removeKeyMonitor()
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard event.window is FloatingPalettePanel else {
+                return event
+            }
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+            switch event.keyCode {
+            case 126: // Up Arrow
+                guard !showActionMenu else { return event }
+                if selectedIndex > 0 {
+                    selectedIndex -= 1
+                }
+                return nil
+
+            case 125: // Down Arrow
+                guard !showActionMenu else { return event }
+                let count = filteredClips.count
+                if selectedIndex + 1 < count {
+                    selectedIndex += 1
+                }
+                return nil
+
+            case 53: // Escape
+                if showActionMenu {
+                    showActionMenu = false
+                } else {
+                    onDismiss()
+                }
+                return nil
+
+            case 36, 76: // Return or Keypad Enter
+                guard !showActionMenu, let clip = selectedClip else { return event }
+                if flags.contains(.command) {
+                    let plain = clip.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                    coordinator.copyToSystemClipboard(plain, markClipID: clip.id)
+                } else {
+                    coordinator.copyToSystemClipboard(clip.content, markClipID: clip.id)
+                }
+                onDismiss()
+                return nil
+
+            case 40: // 'K' key
+                if flags.contains(.command), selectedClip != nil {
+                    showActionMenu.toggle()
+                    return nil
+                }
+                return event
+
+            default:
+                return event
+            }
+        }
+    }
+
+    private func removeKeyMonitor() {
+        if let monitor = keyMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyMonitor = nil
+        }
+    }
+
+    // MARK: - 7.3.2 Header Bar
+
+    private var headerBar: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "shield.lefthalf.filled")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(GhostTheme.accent)
+
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 13))
+                .foregroundColor(GhostTheme.textMuted(scheme))
+
+            TextField("Search clipboard history, languages, hosts, or colors…", text: $coordinator.searchQuery)
+                .textFieldStyle(.plain)
+                .font(.system(size: 14, weight: .regular))
+                .foregroundColor(GhostTheme.textPrimary(scheme))
+                .focused($isSearchFocused)
+                .onSubmit {
+                    if let clip = selectedClip {
+                        coordinator.copyToSystemClipboard(clip.content, markClipID: clip.id)
+                        onDismiss()
+                    }
+                }
+
+            if !coordinator.searchQuery.isEmpty {
+                Button {
+                    coordinator.searchQuery = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundColor(GhostTheme.textMuted(scheme))
+                }
+                .buttonStyle(.plain)
+            }
+
+            // Monitoring status indicator
+            Button {
+                coordinator.preferences.monitoringPaused.toggle()
+            } label: {
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(coordinator.preferences.monitoringPaused ? GhostTheme.warning : GhostTheme.success)
+                        .frame(width: 7, height: 7)
+                    Text(coordinator.preferences.monitoringPaused ? "Paused" : "Capturing")
+                        .font(GhostTheme.metadataFont)
+                        .foregroundColor(GhostTheme.textSecondary(scheme))
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(GhostTheme.elevated(scheme))
+                .cornerRadius(4)
+            }
+            .buttonStyle(.plain)
+            .help("Toggle live clipboard monitoring")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(GhostTheme.surface(scheme))
+    }
+
+    // MARK: - 7.3.3 Category Strip
+
+    private var categoryStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(PaletteTab.allCases) { tab in
+                    let isSelected = (selectedTab == tab)
+                    Button {
+                        selectedTab = tab
+                    } label: {
+                        Text(tab.rawValue)
+                            .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+                            .foregroundColor(isSelected ? GhostTheme.darkBackground : GhostTheme.textSecondary(scheme))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(isSelected ? GhostTheme.accent : GhostTheme.elevated(scheme))
+                            .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
+        .background(GhostTheme.background(scheme))
+    }
+
+    // MARK: - 7.3.4 Results List & Quick Compact Preview
+
+    private var mainSplitContent: some View {
+        let clips = filteredClips
+        return HStack(spacing: 0) {
+            if clips.isEmpty {
+                emptyStateView
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 2) {
+                            ForEach(Array(clips.enumerated()), id: \.element.id) { idx, clip in
+                                paletteRow(clip: clip, isSelected: idx == selectedIndex)
+                                    .id(clip.id)
+                                    .onTapGesture {
+                                        selectedIndex = idx
+                                    }
+                                    .simultaneousGesture(
+                                        TapGesture(count: 2).onEnded {
+                                            coordinator.copyToSystemClipboard(clip.content, markClipID: clip.id)
+                                            onDismiss()
+                                        }
+                                    )
+                            }
+                        }
+                        .padding(6)
+                    }
+                    .onChange(of: selectedIndex) { newIdx in
+                        if newIdx >= 0 && newIdx < clips.count {
+                            withAnimation(.easeOut(duration: 0.12)) {
+                                proxy.scrollTo(clips[newIdx].id, anchor: .center)
+                            }
+                        }
+                    }
+                }
+                .frame(width: 310)
+
+                Divider().overlay(GhostTheme.border(scheme))
+
+                // Right quick preview pane
+                if let current = selectedClip {
+                    compactInspectorPane(for: current)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+        }
+    }
+
+    private func paletteRow(clip: ClipItem, isSelected: Bool) -> some View {
+        HStack(spacing: 8) {
+            // Color swatch or category icon
+            if clip.primaryCategory == .hexColor, let col = clip.colorComponents {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color(red: col.red, green: col.green, blue: col.blue, opacity: col.alpha))
+                    .frame(width: 18, height: 18)
+                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(GhostTheme.border(scheme), lineWidth: 1))
+            } else {
+                Image(systemName: clip.primaryCategory.systemIconName)
+                    .font(.system(size: 12))
+                    .foregroundColor(isSelected ? GhostTheme.accent : GhostTheme.textSecondary(scheme))
+                    .frame(width: 18, height: 18)
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(clip.isSensitiveOrEphemeral ? clip.maskedPreview : clip.contentPreview)
+                    .font(clip.primaryCategory == .code || clip.primaryCategory == .json || clip.primaryCategory == .terminalCommand ? GhostTheme.codeFont : GhostTheme.bodyFont)
+                    .foregroundColor(GhostTheme.textPrimary(scheme))
+                    .lineLimit(1)
+
+                HStack(spacing: 6) {
+                    CategoryBadgeView(
+                        label: clip.detectedLanguage?.shortBadge ?? clip.primaryCategory.shortLabel,
+                        isHighlighted: isSelected
+                    )
+
+                    if let app = clip.sourceApplication {
+                        Text(app)
+                            .font(GhostTheme.metadataFont)
+                            .foregroundColor(GhostTheme.textMuted(scheme))
+                            .lineLimit(1)
+                    }
+
+                    Spacer()
+
+                    if let rem = clip.remainingSeconds(at: now), rem < 3600 {
+                        Text("\(Int(rem))s")
+                            .font(GhostTheme.badgeFont)
+                            .foregroundColor(GhostTheme.warning)
+                    } else {
+                        Text(shortRelativeTime(clip.createdAt))
+                            .font(GhostTheme.metadataFont)
+                            .foregroundColor(GhostTheme.textMuted(scheme))
+                    }
+
+                    if clip.isPinned {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 9))
+                            .foregroundColor(GhostTheme.accent)
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(isSelected ? GhostTheme.elevated(scheme) : Color.clear)
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(isSelected ? GhostTheme.accent.opacity(0.45) : Color.clear, lineWidth: 1)
+        )
+        .cornerRadius(6)
+    }
+
+    private func compactInspectorPane(for clip: ClipItem) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text(clip.primaryCategory.displayName.uppercased())
+                    .font(GhostTheme.badgeFont)
+                    .foregroundColor(GhostTheme.accent)
+                if let lang = clip.detectedLanguage {
+                    Text("• \(lang.rawValue)")
+                        .font(GhostTheme.metadataFont)
+                        .foregroundColor(GhostTheme.textSecondary(scheme))
+                }
+                Spacer()
+                Button {
+                    showActionMenu = true
+                } label: {
+                    HStack(spacing: 4) {
+                        Text("Actions")
+                            .font(GhostTheme.metadataFont)
+                        KeycapBadge("⌘K")
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(10)
+            .background(GhostTheme.surface(scheme))
+
+            Divider().overlay(GhostTheme.border(scheme))
+
+            ScrollView {
+                let previewText: String = {
+                    if clip.primaryCategory == .json && coordinator.preferences.autoFormatJSONPreview,
+                       let pretty = coordinator.actionsEngine.prettyPrintJSON(clip.content) {
+                        return pretty
+                    }
+                    return clip.content
+                }()
+
+                VStack(alignment: .leading, spacing: 10) {
+                    if clip.isSensitiveOrEphemeral {
+                        Text(clip.maskedPreview)
+                            .font(GhostTheme.codeFont)
+                            .foregroundColor(GhostTheme.warning)
+                    } else if (clip.primaryCategory == .code || clip.primaryCategory == .json) && coordinator.preferences.syntaxHighlightingEnabled {
+                        Text(SyntaxHighlighter.highlight(previewText, language: clip.detectedLanguage, scheme: scheme))
+                            .textSelection(.enabled)
+                    } else {
+                        Text(previewText)
+                            .font(GhostTheme.codeFont)
+                            .foregroundColor(GhostTheme.textPrimary(scheme))
+                            .textSelection(.enabled)
+                    }
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            Divider().overlay(GhostTheme.border(scheme))
+
+            // Quick primary action bar
+            HStack(spacing: 8) {
+                Button {
+                    coordinator.copyToSystemClipboard(clip.content, markClipID: clip.id)
+                    onDismiss()
+                } label: {
+                    HStack(spacing: 4) {
+                        Text("Copy")
+                        KeycapBadge("↩")
+                    }
+                    .font(GhostTheme.metadataFont)
+                    .foregroundColor(GhostTheme.textPrimary(scheme))
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    let plain = clip.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                    coordinator.copyToSystemClipboard(plain, markClipID: clip.id)
+                    onDismiss()
+                } label: {
+                    HStack(spacing: 4) {
+                        Text("Plain")
+                        KeycapBadge("⌘↩")
+                    }
+                    .font(GhostTheme.metadataFont)
+                    .foregroundColor(GhostTheme.textSecondary(scheme))
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                Button {
+                    onOpenFullHistory()
+                } label: {
+                    Label("Full Workspace", systemImage: "macwindow")
+                        .font(GhostTheme.metadataFont)
+                        .foregroundColor(GhostTheme.accent)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(GhostTheme.surface(scheme))
+        }
+    }
+
+    private var emptyStateView: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "doc.on.clipboard")
+                .font(.system(size: 24))
+                .foregroundColor(GhostTheme.textMuted(scheme))
+            Text("No matching clipboard items")
+                .font(GhostTheme.bodyMedium)
+                .foregroundColor(GhostTheme.textSecondary(scheme))
+            Text("Copy code, URLs, JSON, Markdown, or colors to capture automatically.")
+                .font(GhostTheme.metadataFont)
+                .foregroundColor(GhostTheme.textMuted(scheme))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - 7.3.5 Footer Bar & Keyboard Navigation
+
+    private var footerBar: some View {
+        let clips = filteredClips
+        return HStack(spacing: 12) {
+            HStack(spacing: 4) {
+                Button {
+                    if selectedIndex > 0 { selectedIndex -= 1 }
+                } label: { KeycapBadge("↑") }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.upArrow, modifiers: [])
+
+                Button {
+                    if selectedIndex + 1 < clips.count { selectedIndex += 1 }
+                } label: { KeycapBadge("↓") }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.downArrow, modifiers: [])
+
+                Text("Navigate")
+                    .font(GhostTheme.metadataFont)
+                    .foregroundColor(GhostTheme.textMuted(scheme))
+            }
+
+            HStack(spacing: 4) {
+                Button {
+                    if let clip = selectedClip {
+                        coordinator.copyToSystemClipboard(clip.content, markClipID: clip.id)
+                        onDismiss()
+                    }
+                } label: { KeycapBadge("↩") }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.return, modifiers: [])
+
+                Text("Copy")
+                    .font(GhostTheme.metadataFont)
+                    .foregroundColor(GhostTheme.textMuted(scheme))
+            }
+
+            HStack(spacing: 4) {
+                Button {
+                    if let clip = selectedClip {
+                        let plain = clip.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                        coordinator.copyToSystemClipboard(plain, markClipID: clip.id)
+                        onDismiss()
+                    }
+                } label: { KeycapBadge("⌘↩") }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.return, modifiers: [.command])
+
+                Text("Plain")
+                    .font(GhostTheme.metadataFont)
+                    .foregroundColor(GhostTheme.textMuted(scheme))
+            }
+
+            HStack(spacing: 4) {
+                Button {
+                    showActionMenu.toggle()
+                } label: { KeycapBadge("⌘K") }
+                .buttonStyle(.plain)
+                .keyboardShortcut("k", modifiers: [.command])
+
+                Text("Actions")
+                    .font(GhostTheme.metadataFont)
+                    .foregroundColor(GhostTheme.textMuted(scheme))
+            }
+
+            Spacer()
+
+            // Privacy status & result count
+            HStack(spacing: 6) {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 10))
+                    .foregroundColor(GhostTheme.success)
+                Text("Local AES-GCM • \(clips.count) items")
+                    .font(GhostTheme.metadataFont)
+                    .foregroundColor(GhostTheme.textSecondary(scheme))
+            }
+
+            Button {
+                onOpenSettings()
+            } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 12))
+                    .foregroundColor(GhostTheme.textSecondary(scheme))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(GhostTheme.surface(scheme))
+    }
+
+    // MARK: - Cmd+K Developer Action Menu Sheet
+
+    private func actionMenuSheet(for clip: ClipItem) -> some View {
+        let actions = coordinator.actionsEngine.availableActions(for: clip)
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Developer Actions — \(clip.primaryCategory.displayName)")
+                    .font(GhostTheme.titleFont)
+                    .foregroundColor(GhostTheme.textPrimary(scheme))
+                Spacer()
+                Button("Close (Esc)") {
+                    showActionMenu = false
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+            .padding(12)
+            .background(GhostTheme.surface(scheme))
+
+            Divider().overlay(GhostTheme.border(scheme))
+
+            ScrollView {
+                VStack(spacing: 6) {
+                    ForEach(actions, id: \.id) { action in
+                        Button {
+                            if let transformed = action.transformedContent {
+                                coordinator.copyToSystemClipboard(transformed, markClipID: clip.id)
+                                showActionMenu = false
+                                onDismiss()
+                            }
+                        } label: {
+                            HStack {
+                                Image(systemName: action.iconName)
+                                    .foregroundColor(action.isWarning ? GhostTheme.warning : GhostTheme.accent)
+                                    .frame(width: 20)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(action.title)
+                                        .font(GhostTheme.bodyMedium)
+                                        .foregroundColor(GhostTheme.textPrimary(scheme))
+                                    Text(action.summaryMessage)
+                                        .font(GhostTheme.metadataFont)
+                                        .foregroundColor(GhostTheme.textMuted(scheme))
+                                        .lineLimit(1)
+                                }
+                                Spacer()
+                                if action.transformedContent != nil {
+                                    KeycapBadge("Copy")
+                                }
+                            }
+                            .padding(8)
+                            .background(GhostTheme.elevated(scheme))
+                            .cornerRadius(6)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(12)
+            }
+        }
+        .frame(width: 460, height: 320)
+        .background(GhostTheme.background(scheme))
+    }
+
+    private func shortRelativeTime(_ date: Date) -> String {
+        let diff = max(0, Int(now.timeIntervalSince(date)))
+        if diff < 60 { return "\(diff)s" }
+        if diff < 3600 { return "\(diff / 60)m" }
+        if diff < 86_400 { return "\(diff / 3600)h" }
+        return "\(diff / 86_400)d"
+    }
+}
