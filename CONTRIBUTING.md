@@ -24,7 +24,7 @@ GhostClipboard/
 │   │   │   ├── ContentClassificationEngine.swift # 9 categories & 17-language code classifier
 │   │   │   └── RegexCache.swift                  # Thread-safe pre-compiled NSRegularExpression cache
 │   │   ├── Models/
-│   │   │   └── CoreModels.swift                  # SensitivityLevel, ClipCategory, ClipRecord, GhostPreferences
+│   │   │   └── CoreModels.swift                  # SensitivityLevel, ClipCategory, ClipItem, GhostPreferences
 │   │   ├── Security/
 │   │   │   ├── CryptoVault.swift                 # AES-256-GCM encryption + HKDF/HMAC-SHA256 blind indexing
 │   │   │   └── SensitiveContentEngine.swift      # Pre-persistence secret, PEM, token, entropy & OTP detector
@@ -86,7 +86,7 @@ If your change touches `Sources/GhostClipboardApp`, `Resources/`, or `scripts/`,
 
 1. **Zero Plaintext Leakage**: Never store unencrypted clip content, previews, or raw search words in SQLite tables (`clips` or `clips_fts`), logs, or `UserDefaults`. All FTS indexing must go through `CryptoVault.blindIndexTokens(for:)`.
 2. **Pre-Compilation for Hot Paths**: Any regular expression used in `SensitiveContentEngine` or `ContentClassificationEngine` must be retrieved through `RegexCache.shared` rather than compiled per clipboard event.
-3. **Idle Resource Discipline**: Background timers must not spin when idle. The ephemeral countdown timer in `ClipboardCoordinator` must remain cancelled (`0 Hz`) whenever `ephemeralItems` and `quarantinedItems` are empty or monitoring is paused.
+3. **Idle Resource Discipline**: Background timers must not spin when idle. The ephemeral countdown timer in `ClipboardCoordinator` must remain cancelled (`0 Hz`) whenever `ephemeralClips` is empty or monitoring is paused.
 4. **Add Regression Assertions**: Every new secret signature, developer action, or bug fix must include corresponding assertions in `Tests/GhostClipboardTests/GhostClipboardTests.swift`.
 
 ---

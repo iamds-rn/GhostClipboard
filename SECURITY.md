@@ -8,13 +8,13 @@ GhostClipboard is engineered around a simple invariant: **sensitive credentials 
 
 ### What GhostClipboard Protects Against
 1. **Accidental Secret Persistence**: Copying passwords from 1Password/Bitwarden/Keychain, cloud API keys (`AKIA...`, `ghp_...`, `sk-...`, `sk-ant-...`, `sk_live_...`, `xoxb-...`, `AIza...`), PEM/SSH private keys, JWTs, database connection URLs with credentials, or `.env` files.
-   - **Mitigation**: `SensitiveContentEngine` evaluates pasteboard metadata (`org.nspasteboard.ConcealedType`, password manager bundle IDs) and content signatures **before** any SQLite write occurs. Level 3 secrets are discarded immediately (`Disposition.discardImmediately`).
+   - **Mitigation**: `SensitiveContentEngine` evaluates pasteboard metadata (`org.nspasteboard.ConcealedType`, password manager bundle IDs) and content signatures **before** any SQLite write occurs. `Level 2` (`SensitivityLevel.sensitive`) secrets are discarded immediately (`RetentionDisposition.discardImmediately`).
 2. **Plaintext Disk Inspection / Forensic Leakage**: Malware, backup indexers, or unauthorized processes reading SQLite `.sqlite3`, `-wal`, or `-shm` files on disk.
    - **Mitigation**: Every persisted clip payload and preview is encrypted via `AES-256-GCM`. Furthermore, the SQLite FTS5 full-text search table (`clips_fts`) stores **zero plaintext words**—only `HMAC-SHA256` blind tokens (`bi_<16-hex>`).
-3. **Opaque High-Entropy Secret Exposure**: Copying unlabeled secret tokens that lack a known vendor prefix.
-   - **Mitigation**: Strings with Shannon entropy `≥ 4.15 bits/char` that match token structural heuristics are quarantined in memory only (`Disposition.quarantineShortLived`, 10-minute TTL) and never written to SQLite unless explicitly promoted by the user.
+3. **Opaque High-Entropy Secret Exposure**: Copying unlabeled secret tokens or password candidates that lack a known vendor prefix.
+   - **Mitigation**: Standalone strings matching token/password structural heuristics with high Shannon entropy (`≥ 3.7 bits/char` across 4 character classes or `≥ 4.25 bits/char` across 3+ classes) are classified as `Level 1` (`SensitivityLevel.potentiallySensitive`) and quarantined in memory only (`RetentionDisposition.memoryOnlyEphemeral`, 10-minute quarantine TTL) and never written to SQLite unless explicitly promoted by the user.
 4. **Lingering 2FA / OTP Codes**: One-time verification codes left on the system pasteboard indefinitely.
-   - **Mitigation**: Ephemeral secrets (`Level 2`) live strictly in RAM for 30 seconds (`secretExpirationDurationSeconds`) and are purged from both GhostClipboard's memory and `NSPasteboard.general` when the countdown expires.
+   - **Mitigation**: Ephemeral secrets (`Level 3` — `SensitivityLevel.ephemeralSecret`) live strictly in RAM (`RetentionDisposition.memoryOnlyEphemeral`) and are purged from both GhostClipboard's memory and `NSPasteboard.general` when the countdown expires.
 5. **Unauthorized Local CLI Scraping**: Unprivileged scripts attempting to dump clipboard history via `ghostclipboard-cli`.
    - **Mitigation**: CLI read subcommands (`recent`, `search`, `list`) are gated by the `enableCLIAccess` preference and return exit code `2` when disabled.
 
@@ -39,7 +39,7 @@ You can verify that neither the `clips` table nor the `clips_fts` full-text inde
 ```bash
 swift run GhostClipboardTests
 ```
-Specifically, `testSQLiteStorageAndFTS` inspects the raw SQLite tables and asserts that no plaintext tokens exist in `clips_fts`.
+Specifically, Section 12 (`Zero-Plaintext HMAC-SHA256 Blind Index & Raw Disk Verification`) in `Tests/GhostClipboardTests/GhostClipboardTests.swift` checkpoints the SQLite WAL and inspects the raw bytes of the `.sqlite3` and `-wal` files on disk to assert that zero plaintext tokens or payloads exist on disk.
 
 ---
 
