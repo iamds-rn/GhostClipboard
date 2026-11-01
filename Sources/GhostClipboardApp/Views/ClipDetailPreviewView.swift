@@ -30,8 +30,17 @@ public struct ClipDetailPreviewView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     if clip.isSensitiveOrEphemeral {
                         sensitivePreviewCard
+                        if isRevealed, let jwt = coordinator.actionsEngine.decodeJWT(clip.content, now: now) {
+                            jwtInspectorCard(jwt)
+                        }
                     } else {
                         categorySpecificPreview
+                        if let jwt = coordinator.actionsEngine.decodeJWT(clip.content, now: now) {
+                            jwtInspectorCard(jwt)
+                        }
+                        if let tsInfo = coordinator.actionsEngine.parseTimestamp(clip.content) {
+                            timestampInspectorCard(tsInfo)
+                        }
                     }
 
                     metadataGridSection
@@ -42,6 +51,7 @@ public struct ClipDetailPreviewView: View {
         }
         .background(GhostTheme.surface(scheme))
         .onAppear {
+            now = Date()
             showFormattedJSON = coordinator.preferences.autoFormatJSONPreview
         }
         .onChange(of: clip.id) { _ in
@@ -58,7 +68,9 @@ public struct ClipDetailPreviewView: View {
             }
         }
         .onReceive(timer) { tick in
-            now = tick
+            if clip.isEphemeral || !coordinator.ephemeralClips.isEmpty {
+                now = tick
+            }
         }
     }
 
@@ -629,6 +641,112 @@ public struct ClipDetailPreviewView: View {
         .overlay(
             RoundedRectangle(cornerRadius: 6)
                 .stroke(GhostTheme.warning.opacity(0.45), lineWidth: 1)
+        )
+        .cornerRadius(6)
+    }
+
+    // MARK: - Smart JWT Claims Inspector Card & Timestamp Card
+
+    private func jwtInspectorCard(_ jwt: DecodedJWT) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "key.viewfinder")
+                    .foregroundColor(GhostTheme.accent)
+                Text("DECODED JWT INSPECTOR")
+                    .font(GhostTheme.badgeFont)
+                    .foregroundColor(GhostTheme.accent)
+
+                if let alg = jwt.algorithm {
+                    CategoryBadgeView(label: alg, isHighlighted: true)
+                }
+
+                if let isExp = jwt.isExpired {
+                    Text(isExp ? "EXPIRED" : "VALID")
+                        .font(GhostTheme.badgeFont)
+                        .foregroundColor(isExp ? GhostTheme.danger : GhostTheme.success)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background((isExp ? GhostTheme.danger : GhostTheme.success).opacity(0.15))
+                        .cornerRadius(4)
+                }
+
+                Spacer()
+
+                Button {
+                    coordinator.copyToSystemClipboard(jwt.combinedFormatted, markClipID: clip.id)
+                    lastActionFeedback = "Copied decoded JWT JSON"
+                } label: {
+                    Label("Copy Decoded JSON", systemImage: "doc.on.doc")
+                        .font(GhostTheme.metadataFont)
+                        .foregroundColor(GhostTheme.accent)
+                }
+                .buttonStyle(.plain)
+            }
+
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("HEADER")
+                        .font(GhostTheme.badgeFont)
+                        .foregroundColor(GhostTheme.textMuted(scheme))
+                    Text(SyntaxHighlighter.highlight(jwt.headerJSON, language: .javascript, scheme: scheme))
+                        .textSelection(.enabled)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(GhostTheme.surface(scheme))
+                        .cornerRadius(4)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("CLAIMS PAYLOAD")
+                        .font(GhostTheme.badgeFont)
+                        .foregroundColor(GhostTheme.textMuted(scheme))
+                    Text(SyntaxHighlighter.highlight(jwt.claimsJSON, language: .javascript, scheme: scheme))
+                        .textSelection(.enabled)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(GhostTheme.surface(scheme))
+                        .cornerRadius(4)
+                }
+            }
+        }
+        .padding(12)
+        .background(GhostTheme.background(scheme))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(GhostTheme.accent.opacity(0.4), lineWidth: 1)
+        )
+        .cornerRadius(6)
+    }
+
+    private func timestampInspectorCard(_ ts: TimestampInfo) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "clock.badge.checkmark")
+                    .foregroundColor(GhostTheme.accent)
+                Text("TIMESTAMP CONVERTER")
+                    .font(GhostTheme.badgeFont)
+                    .foregroundColor(GhostTheme.accent)
+                Spacer()
+                Button {
+                    coordinator.copyToSystemClipboard(ts.iso8601UTC, markClipID: clip.id)
+                    lastActionFeedback = "Copied \(ts.iso8601UTC)"
+                } label: {
+                    Label("Copy ISO-8601", systemImage: "doc.on.doc")
+                        .font(GhostTheme.metadataFont)
+                        .foregroundColor(GhostTheme.accent)
+                }
+                .buttonStyle(.plain)
+            }
+
+            metadataRow("UTC Time", value: ts.humanUTC)
+            metadataRow("Local Time", value: ts.humanLocal)
+            metadataRow("ISO-8601", value: ts.iso8601UTC)
+            metadataRow("Unix Epoch", value: "\(ts.epochSeconds)s (\(ts.epochMilliseconds)ms)")
+        }
+        .padding(10)
+        .background(GhostTheme.background(scheme))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(GhostTheme.accent.opacity(0.35), lineWidth: 1)
         )
         .cornerRadius(6)
     }

@@ -19,7 +19,7 @@ public enum StorageError: Error, LocalizedError {
 
 public final class SQLiteStorageEngine: @unchecked Sendable {
     private var db: OpaquePointer?
-    private let queue = DispatchQueue(label: "com.ghostclipboard.sqlite.queue", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "com.ghostclipboard.sqlite", qos: .userInitiated)
     private let vault: CryptoVault
     public let databasePath: String
 
@@ -40,7 +40,7 @@ public final class SQLiteStorageEngine: @unchecked Sendable {
         self.databasePath = url.path
         self.vault = vault
 
-        let flags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
+        let flags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX
         if sqlite3_open_v2(url.path, &db, flags, nil) != SQLITE_OK {
             let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "Unknown open error"
             throw StorageError.openDatabaseFailed(msg)
@@ -50,6 +50,7 @@ public final class SQLiteStorageEngine: @unchecked Sendable {
         try configurePragmas()
         try migrateSchema()
         try seedDefaultCategoriesAndExclusions()
+        try migrateFTSIndexToBlindTokensIfNeeded()
     }
 
     deinit {
@@ -58,13 +59,24 @@ public final class SQLiteStorageEngine: @unchecked Sendable {
         }
     }
 
-    // MARK: - Schema & Migrations (Section 10.1 & 10.2)
+    // MARK: - Schema, Pragmas & Zero-Plaintext Blind FTS Migration
 
     private func configurePragmas() throws {
         try executeRaw("PRAGMA journal_mode = WAL;")
         try executeRaw("PRAGMA synchronous = NORMAL;")
+        try executeRaw("PRAGMA temp_store = MEMORY;")
+        try executeRaw("PRAGMA cache_size = -2000;")
+        try executeRaw("PRAGMA mmap_size = 16777216;")
         try executeRaw("PRAGMA foreign_keys = ON;")
         try executeRaw("PRAGMA secure_delete = ON;")
+    }
+
+    public func releaseMemory() {
+        queue.sync {
+            if let db = db {
+                _ = sqlite3_db_release_memory(db)
+            }
+        }
     }
 
     private func migrateSchema() throws {
@@ -212,6 +224,74 @@ public final class SQLiteStorageEngine: @unchecked Sendable {
         }
     }
 
+    /// Automatically migrates any legacy plaintext FTS5 rows to HMAC-SHA256 blind tokens and vacuums the SQLite file.
+    private func migrateFTSIndexToBlindTokensIfNeeded() throws {
+        try queue.sync {
+            let migrated = scalarInt("SELECT COUNT(*) FROM preferences WHERE key = 'blind_fts_v2_migrated' AND value = '1';") > 0
+            let hasLegacyPlaintextFTS = scalarInt("SELECT COUNT(*) FROM clips_fts WHERE searchable_text NOT LIKE 'bi_%' AND searchable_text != '';") > 0
+
+            guard !migrated || hasLegacyPlaintextFTS else { return }
+
+            // Fetch all existing clips and re-index with HMAC-SHA256 blind tokens
+            var existingClips: [ClipItem] = []
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "SELECT * FROM clips;", -1, &stmt, nil) == SQLITE_OK {
+                while sqlite3_step(stmt) == SQLITE_ROW {
+                    if let clip = decodeClipRow(stmt) {
+                        existingClips.append(clip)
+                    }
+                }
+                sqlite3_finalize(stmt)
+            }
+
+            try executeRawInternal("DELETE FROM clips_fts;")
+
+            for clip in existingClips where clip.sensitivityLevel == .normal && !clip.isEphemeral {
+                // Also ensure url_hostname is encrypted at rest
+                if let host = clip.urlHostname, let encHost = encryptOptionalField(host) {
+                    var upStmt: OpaquePointer?
+                    if sqlite3_prepare_v2(db, "UPDATE clips SET url_hostname = ? WHERE id = ?;", -1, &upStmt, nil) == SQLITE_OK {
+                        bindText(upStmt, index: 1, value: encHost)
+                        bindText(upStmt, index: 2, value: clip.id.uuidString)
+                        sqlite3_step(upStmt)
+                        sqlite3_finalize(upStmt)
+                    }
+                }
+                try indexClipInFTSInternal(clip)
+            }
+
+            var markerStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO preferences (key, value, updated_at) VALUES ('blind_fts_v2_migrated', '1', ?);", -1, &markerStmt, nil) == SQLITE_OK {
+                sqlite3_bind_double(markerStmt, 1, Date().timeIntervalSince1970)
+                sqlite3_step(markerStmt)
+                sqlite3_finalize(markerStmt)
+            }
+
+            // Reclaim and overwrite any historical plaintext pages in WAL and main database file
+            try? executeRawInternal("PRAGMA wal_checkpoint(TRUNCATE);")
+            try? executeRawInternal("VACUUM;")
+        }
+    }
+
+    private func encryptOptionalField(_ plaintext: String?) -> String? {
+        guard let plaintext = plaintext, !plaintext.isEmpty else { return nil }
+        guard let encrypted = try? vault.encryptString(plaintext) else { return nil }
+        return "enc:" + encrypted.base64EncodedString()
+    }
+
+    private func decryptOptionalField(_ stored: String?) -> String? {
+        guard let stored = stored, !stored.isEmpty else { return nil }
+        if stored.hasPrefix("enc:") {
+            let b64 = String(stored.dropFirst(4))
+            guard let data = Data(base64Encoded: b64),
+                  let decrypted = try? vault.decryptString(data) else {
+                return nil
+            }
+            return decrypted
+        }
+        return stored
+    }
+
     // MARK: - Save & Update Clips
 
     /// Persists a clip. Note: Security rule 6.1 strictly forbids Level 2/3 sensitive secrets from being persisted in SQLite.
@@ -222,79 +302,101 @@ public final class SQLiteStorageEngine: @unchecked Sendable {
         }
 
         try queue.sync {
-            if ignoreDuplicates, let existingID = try findClipIDByHashInternal(clip.contentHash) {
-                try touchClipInternal(id: existingID, at: clip.createdAt)
-                return
+            try saveClipInternal(clip, ignoreDuplicates: ignoreDuplicates)
+        }
+    }
+
+    /// High-throughput batch insert inside a single SQLite transaction on the persistent connection.
+    public func saveClipsBatch(_ clips: [ClipItem], ignoreDuplicates: Bool = true) throws {
+        try queue.sync {
+            try executeRawInternal("BEGIN IMMEDIATE TRANSACTION;")
+            do {
+                for clip in clips where clip.sensitivityLevel == .normal && !clip.isEphemeral {
+                    try saveClipInternal(clip, ignoreDuplicates: ignoreDuplicates)
+                }
+                try executeRawInternal("COMMIT;")
+            } catch {
+                try? executeRawInternal("ROLLBACK;")
+                throw error
             }
+        }
+    }
 
-            let encryptedContent = try vault.encryptString(clip.content)
-            let encryptedPreview = try vault.encryptString(clip.contentPreview)
+    private func saveClipInternal(_ clip: ClipItem, ignoreDuplicates: Bool) throws {
+        if ignoreDuplicates, let existingID = try findClipIDByHashInternal(clip.contentHash) {
+            try touchClipInternal(id: existingID, at: clip.createdAt)
+            return
+        }
 
-            let secondaryJSON = (try? String(data: JSONEncoder().encode(clip.secondaryCategories), encoding: .utf8)) ?? "[]"
-            let colorJSON = clip.colorComponents.flatMap { try? String(data: JSONEncoder().encode($0), encoding: .utf8) }
-            let reasonsJSON = (try? String(data: JSONEncoder().encode(clip.detectionReasons), encoding: .utf8)) ?? "[]"
+        let encryptedContent = try vault.encryptString(clip.content)
+        let encryptedPreview = try vault.encryptString(clip.contentPreview)
+        let encryptedHostname = encryptOptionalField(clip.urlHostname)
+        let encryptedWarning = encryptOptionalField(clip.terminalSafetyWarning)
 
-            let sql = """
-            INSERT OR REPLACE INTO clips (
-                id, encrypted_content, encrypted_preview, content_hash,
-                primary_category, secondary_categories_json, detected_language,
-                source_application, source_bundle_id, sensitivity_level,
-                is_pinned, is_favorite, is_ephemeral,
-                character_count, line_count, byte_size,
-                created_at, updated_at, last_used_at, expires_at,
-                color_json, url_hostname, is_suspicious_domain,
-                terminal_warning, detection_reasons_json, user_overrode_category
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-            """
+        let secondaryJSON = (try? String(data: JSONEncoder().encode(clip.secondaryCategories), encoding: .utf8)) ?? "[]"
+        let colorJSON = clip.colorComponents.flatMap { try? String(data: JSONEncoder().encode($0), encoding: .utf8) }
+        let reasonsJSON = (try? String(data: JSONEncoder().encode(clip.detectionReasons), encoding: .utf8)) ?? "[]"
 
-            var stmt: OpaquePointer?
-            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
-                throw StorageError.statementFailed(lastErrorMessage())
-            }
-            defer { sqlite3_finalize(stmt) }
+        let sql = """
+        INSERT OR REPLACE INTO clips (
+            id, encrypted_content, encrypted_preview, content_hash,
+            primary_category, secondary_categories_json, detected_language,
+            source_application, source_bundle_id, sensitivity_level,
+            is_pinned, is_favorite, is_ephemeral,
+            character_count, line_count, byte_size,
+            created_at, updated_at, last_used_at, expires_at,
+            color_json, url_hostname, is_suspicious_domain,
+            terminal_warning, detection_reasons_json, user_overrode_category
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """
 
-            bindText(stmt, index: 1, value: clip.id.uuidString)
-            bindBlob(stmt, index: 2, data: encryptedContent)
-            bindBlob(stmt, index: 3, data: encryptedPreview)
-            bindText(stmt, index: 4, value: clip.contentHash)
-            bindText(stmt, index: 5, value: clip.primaryCategory.rawValue)
-            bindText(stmt, index: 6, value: secondaryJSON)
-            bindOptionalText(stmt, index: 7, value: clip.detectedLanguage?.rawValue)
-            bindOptionalText(stmt, index: 8, value: clip.sourceApplication)
-            bindOptionalText(stmt, index: 9, value: clip.sourceBundleID)
-            sqlite3_bind_int(stmt, 10, Int32(clip.sensitivityLevel.rawValue))
-            sqlite3_bind_int(stmt, 11, clip.isPinned ? 1 : 0)
-            sqlite3_bind_int(stmt, 12, clip.isFavorite ? 1 : 0)
-            sqlite3_bind_int(stmt, 13, clip.isEphemeral ? 1 : 0)
-            sqlite3_bind_int(stmt, 14, Int32(clip.characterCount))
-            sqlite3_bind_int(stmt, 15, Int32(clip.lineCount))
-            sqlite3_bind_int(stmt, 16, Int32(clip.byteSize))
-            sqlite3_bind_double(stmt, 17, clip.createdAt.timeIntervalSince1970)
-            sqlite3_bind_double(stmt, 18, clip.updatedAt.timeIntervalSince1970)
-            sqlite3_bind_double(stmt, 19, clip.lastUsedAt.timeIntervalSince1970)
-            if let exp = clip.expiresAt {
-                sqlite3_bind_double(stmt, 20, exp.timeIntervalSince1970)
-            } else {
-                sqlite3_bind_null(stmt, 20)
-            }
-            bindOptionalText(stmt, index: 21, value: colorJSON)
-            bindOptionalText(stmt, index: 22, value: clip.urlHostname)
-            sqlite3_bind_int(stmt, 23, clip.isSuspiciousDomain ? 1 : 0)
-            bindOptionalText(stmt, index: 24, value: clip.terminalSafetyWarning)
-            bindText(stmt, index: 25, value: reasonsJSON)
-            sqlite3_bind_int(stmt, 26, clip.userOverrodeCategory ? 1 : 0)
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw StorageError.statementFailed(lastErrorMessage())
+        }
+        defer { sqlite3_finalize(stmt) }
 
-            guard sqlite3_step(stmt) == SQLITE_DONE else {
-                throw StorageError.statementFailed(lastErrorMessage())
-            }
+        bindText(stmt, index: 1, value: clip.id.uuidString)
+        bindBlob(stmt, index: 2, data: encryptedContent)
+        bindBlob(stmt, index: 3, data: encryptedPreview)
+        bindText(stmt, index: 4, value: clip.contentHash)
+        bindText(stmt, index: 5, value: clip.primaryCategory.rawValue)
+        bindText(stmt, index: 6, value: secondaryJSON)
+        bindOptionalText(stmt, index: 7, value: clip.detectedLanguage?.rawValue)
+        bindOptionalText(stmt, index: 8, value: clip.sourceApplication)
+        bindOptionalText(stmt, index: 9, value: clip.sourceBundleID)
+        sqlite3_bind_int(stmt, 10, Int32(clip.sensitivityLevel.rawValue))
+        sqlite3_bind_int(stmt, 11, clip.isPinned ? 1 : 0)
+        sqlite3_bind_int(stmt, 12, clip.isFavorite ? 1 : 0)
+        sqlite3_bind_int(stmt, 13, clip.isEphemeral ? 1 : 0)
+        sqlite3_bind_int(stmt, 14, Int32(clip.characterCount))
+        sqlite3_bind_int(stmt, 15, Int32(clip.lineCount))
+        sqlite3_bind_int(stmt, 16, Int32(clip.byteSize))
+        sqlite3_bind_double(stmt, 17, clip.createdAt.timeIntervalSince1970)
+        sqlite3_bind_double(stmt, 18, clip.updatedAt.timeIntervalSince1970)
+        sqlite3_bind_double(stmt, 19, clip.lastUsedAt.timeIntervalSince1970)
+        if let exp = clip.expiresAt {
+            sqlite3_bind_double(stmt, 20, exp.timeIntervalSince1970)
+        } else {
+            sqlite3_bind_null(stmt, 20)
+        }
+        bindOptionalText(stmt, index: 21, value: colorJSON)
+        bindOptionalText(stmt, index: 22, value: encryptedHostname)
+        sqlite3_bind_int(stmt, 23, clip.isSuspiciousDomain ? 1 : 0)
+        bindOptionalText(stmt, index: 24, value: encryptedWarning)
+        bindText(stmt, index: 25, value: reasonsJSON)
+        sqlite3_bind_int(stmt, 26, clip.userOverrodeCategory ? 1 : 0)
 
-            // Record category assignments
-            try updateCategoryAssignmentsInternal(for: clip)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw StorageError.statementFailed(lastErrorMessage())
+        }
 
-            // Index in FTS5 ONLY for Level 0 normal items
-            if clip.sensitivityLevel == .normal && !clip.isEphemeral {
-                try indexClipInFTSInternal(clip)
-            }
+        // Record category assignments
+        try updateCategoryAssignmentsInternal(for: clip)
+
+        // Index in FTS5 ONLY for Level 0 normal items using HMAC-SHA256 blind tokens
+        if clip.sensitivityLevel == .normal && !clip.isEphemeral {
+            try indexClipInFTSInternal(clip)
         }
     }
 
@@ -334,6 +436,7 @@ public final class SQLiteStorageEngine: @unchecked Sendable {
         }
     }
 
+    /// Stores ONLY HMAC-SHA256 blind index tokens (`bi_<16hex>`) in `clips_fts` so zero plaintext content or hostname exists on disk.
     private func indexClipInFTSInternal(_ clip: ClipItem) throws {
         let delSQL = "DELETE FROM clips_fts WHERE clip_id = ?;"
         var delStmt: OpaquePointer?
@@ -343,6 +446,21 @@ public final class SQLiteStorageEngine: @unchecked Sendable {
             sqlite3_step(delStmt)
         }
 
+        let combinedIndexableText = [
+            clip.content,
+            clip.primaryCategory.displayName,
+            clip.primaryCategory.shortLabel,
+            clip.detectedLanguage?.rawValue ?? "",
+            clip.sourceApplication ?? "",
+            clip.urlHostname ?? ""
+        ].joined(separator: " ")
+
+        let blindSearchableTokens = vault.blindIndexTokens(for: combinedIndexableText)
+        let blindCategoryTokens = vault.blindIndexTokens(for: clip.primaryCategory.displayName)
+        let blindLangTokens = vault.blindIndexTokens(for: clip.detectedLanguage?.rawValue ?? "")
+        let blindAppTokens = vault.blindIndexTokens(for: clip.sourceApplication ?? "")
+        let blindHostTokens = vault.blindIndexTokens(for: clip.urlHostname ?? "")
+
         let insSQL = """
         INSERT INTO clips_fts (clip_id, searchable_text, category, language, source_app, hostname)
         VALUES (?, ?, ?, ?, ?, ?);
@@ -351,11 +469,11 @@ public final class SQLiteStorageEngine: @unchecked Sendable {
         if sqlite3_prepare_v2(db, insSQL, -1, &insStmt, nil) == SQLITE_OK {
             defer { sqlite3_finalize(insStmt) }
             bindText(insStmt, index: 1, value: clip.id.uuidString)
-            bindText(insStmt, index: 2, value: clip.content)
-            bindText(insStmt, index: 3, value: clip.primaryCategory.displayName)
-            bindText(insStmt, index: 4, value: clip.detectedLanguage?.rawValue ?? "")
-            bindText(insStmt, index: 5, value: clip.sourceApplication ?? "")
-            bindText(insStmt, index: 6, value: clip.urlHostname ?? "")
+            bindText(insStmt, index: 2, value: blindSearchableTokens)
+            bindText(insStmt, index: 3, value: blindCategoryTokens)
+            bindText(insStmt, index: 4, value: blindLangTokens)
+            bindText(insStmt, index: 5, value: blindAppTokens)
+            bindText(insStmt, index: 6, value: blindHostTokens)
             sqlite3_step(insStmt)
         }
     }
@@ -385,7 +503,23 @@ public final class SQLiteStorageEngine: @unchecked Sendable {
         sqlite3_step(stmt)
     }
 
-    // MARK: - Fetch & Search Clips
+    // MARK: - Fetch & Search Clips (Cryptographic Blind FTS5 + Decrypted Substring Verification)
+
+    public func searchClips(
+        _ query: String,
+        category: ClipCategory? = nil,
+        pinnedOnly: Bool = false,
+        expiringOnly: Bool = false,
+        limit: Int = 200
+    ) throws -> [ClipItem] {
+        try fetchClips(
+            query: query,
+            category: category,
+            pinnedOnly: pinnedOnly,
+            expiringOnly: expiringOnly,
+            limit: limit
+        )
+    }
 
     public func fetchClips(
         query: String? = nil,
@@ -395,39 +529,48 @@ public final class SQLiteStorageEngine: @unchecked Sendable {
         limit: Int = 200
     ) throws -> [ClipItem] {
         try queue.sync {
-            var conditions: [String] = []
-            var bindings: [String] = []
+            try fetchClipsInternal(
+                query: query,
+                category: category,
+                pinnedOnly: pinnedOnly,
+                expiringOnly: expiringOnly,
+                limit: limit
+            )
+        }
+    }
 
-            if let category = category {
-                conditions.append("(c.primary_category = ? OR EXISTS (SELECT 1 FROM clip_category_assignments ca WHERE ca.clip_id = c.id AND ca.category_slug = ?))")
-                bindings.append(category.rawValue)
-                bindings.append(category.rawValue)
-            }
+    private func fetchClipsInternal(
+        query: String?,
+        category: ClipCategory?,
+        pinnedOnly: Bool,
+        expiringOnly: Bool,
+        limit: Int
+    ) throws -> [ClipItem] {
+        var baseConditions: [String] = []
+        var baseBindings: [String] = []
 
-            if pinnedOnly {
-                conditions.append("(c.is_pinned = 1 OR c.is_favorite = 1)")
-            }
+        if let category = category {
+            baseConditions.append("(c.primary_category = ? OR EXISTS (SELECT 1 FROM clip_category_assignments ca WHERE ca.clip_id = c.id AND ca.category_slug = ?))")
+            baseBindings.append(category.rawValue)
+            baseBindings.append(category.rawValue)
+        }
 
-            if expiringOnly {
-                conditions.append("(c.expires_at IS NOT NULL AND c.is_pinned = 0)")
-            }
+        if pinnedOnly {
+            baseConditions.append("(c.is_pinned = 1 OR c.is_favorite = 1)")
+        }
 
-            let trimmedQuery = query?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if expiringOnly {
+            baseConditions.append("(c.expires_at IS NOT NULL AND c.is_pinned = 0)")
+        }
+
+        let trimmedQuery = query?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        // Case 1: No search query — return filtered rows directly
+        if trimmedQuery.isEmpty {
             var sql = "SELECT c.* FROM clips c "
-
-            if !trimmedQuery.isEmpty {
-                let sanitizedFTS = sanitizeFTSQuery(trimmedQuery)
-                if !sanitizedFTS.isEmpty {
-                    sql += "JOIN clips_fts f ON f.clip_id = c.id "
-                    conditions.append("clips_fts MATCH ?")
-                    bindings.append(sanitizedFTS)
-                }
+            if !baseConditions.isEmpty {
+                sql += "WHERE " + baseConditions.joined(separator: " AND ") + " "
             }
-
-            if !conditions.isEmpty {
-                sql += "WHERE " + conditions.joined(separator: " AND ") + " "
-            }
-
             sql += "ORDER BY c.is_pinned DESC, c.created_at DESC LIMIT \(max(1, limit));"
 
             var stmt: OpaquePointer?
@@ -436,7 +579,7 @@ public final class SQLiteStorageEngine: @unchecked Sendable {
             }
             defer { sqlite3_finalize(stmt) }
 
-            for (i, val) in bindings.enumerated() {
+            for (i, val) in baseBindings.enumerated() {
                 bindText(stmt, index: Int32(i + 1), value: val)
             }
 
@@ -446,30 +589,94 @@ public final class SQLiteStorageEngine: @unchecked Sendable {
                     items.append(item)
                 }
             }
-
-            // Fallback substring filter if FTS tokenization didn't match special characters (like #FF5733 or symbols)
-            if !trimmedQuery.isEmpty && items.isEmpty {
-                let allRecent = try fetchClips(query: nil, category: category, pinnedOnly: pinnedOnly, expiringOnly: expiringOnly, limit: limit)
-                let lowerQ = trimmedQuery.lowercased()
-                return allRecent.filter { clip in
-                    clip.content.lowercased().contains(lowerQ) ||
-                    clip.primaryCategory.displayName.lowercased().contains(lowerQ) ||
-                    (clip.detectedLanguage?.rawValue.lowercased().contains(lowerQ) ?? false) ||
-                    (clip.sourceApplication?.lowercased().contains(lowerQ) ?? false) ||
-                    (clip.urlHostname?.lowercased().contains(lowerQ) ?? false)
-                }
-            }
-
             return items
         }
+
+        // Case 2: Non-empty search query
+        // 2a. Fast cryptographic blind FTS5 lookup for 3+ char word/prefix tokens
+        var results: [ClipItem] = []
+        var seenIDs = Set<UUID>()
+        let blindMatchExpr = buildBlindFTSMatchExpression(for: trimmedQuery)
+
+        if !blindMatchExpr.isEmpty {
+            var ftsConditions = baseConditions
+            var ftsBindings = baseBindings
+            ftsConditions.append("clips_fts MATCH ?")
+            ftsBindings.append(blindMatchExpr)
+
+            var ftsSQL = "SELECT c.* FROM clips c JOIN clips_fts f ON f.clip_id = c.id "
+            ftsSQL += "WHERE " + ftsConditions.joined(separator: " AND ") + " "
+            ftsSQL += "ORDER BY c.is_pinned DESC, c.created_at DESC LIMIT \(max(1, limit));"
+
+            var ftsStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, ftsSQL, -1, &ftsStmt, nil) == SQLITE_OK {
+                for (i, val) in ftsBindings.enumerated() {
+                    bindText(ftsStmt, index: Int32(i + 1), value: val)
+                }
+                while sqlite3_step(ftsStmt) == SQLITE_ROW {
+                    if let item = decodeClipRow(ftsStmt), clipMatchesQueryInMemory(item, query: trimmedQuery) {
+                        if seenIDs.insert(item.id).inserted {
+                            results.append(item)
+                        }
+                    }
+                }
+                sqlite3_finalize(ftsStmt)
+            }
+        }
+
+        // 2b. Hybrid decrypted in-memory scan over recent items so arbitrary substrings ("lateHa"),
+        // short 1-2 char queries, and symbol/hex queries ("#FF5733", "===", ".env") are 100% accurate
+        if results.count < limit {
+            let allCandidates = try fetchClipsInternal(
+                query: nil,
+                category: category,
+                pinnedOnly: pinnedOnly,
+                expiringOnly: expiringOnly,
+                limit: max(limit, 300)
+            )
+            for candidate in allCandidates where !seenIDs.contains(candidate.id) {
+                if clipMatchesQueryInMemory(candidate, query: trimmedQuery) {
+                    seenIDs.insert(candidate.id)
+                    results.append(candidate)
+                    if results.count >= limit {
+                        break
+                    }
+                }
+            }
+        }
+
+        return results
     }
 
-    private func sanitizeFTSQuery(_ raw: String) -> String {
-        let tokens = raw
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { !$0.isEmpty }
-        guard !tokens.isEmpty else { return "" }
-        return tokens.map { "\"\($0)\"*" }.joined(separator: " AND ")
+    private func buildBlindFTSMatchExpression(for rawQuery: String) -> String {
+        let blindTokens = vault.blindIndexQueryTokens(for: rawQuery)
+        guard !blindTokens.isEmpty else { return "" }
+        return blindTokens.map { "\"\($0)\"" }.joined(separator: " AND ")
+    }
+
+    private func clipMatchesQueryInMemory(_ clip: ClipItem, query: String) -> Bool {
+        let lowerQ = query.lowercased()
+        if clip.content.lowercased().contains(lowerQ) ||
+           clip.primaryCategory.displayName.lowercased().contains(lowerQ) ||
+           clip.primaryCategory.shortLabel.lowercased().contains(lowerQ) ||
+           (clip.detectedLanguage?.rawValue.lowercased().contains(lowerQ) ?? false) ||
+           (clip.sourceApplication?.lowercased().contains(lowerQ) ?? false) ||
+           (clip.urlHostname?.lowercased().contains(lowerQ) ?? false) {
+            return true
+        }
+        // Multi-token check: all whitespace-separated query words appear somewhere in the clip or metadata
+        let words = lowerQ.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        if words.count > 1 {
+            let haystack = [
+                clip.content.lowercased(),
+                clip.primaryCategory.displayName.lowercased(),
+                clip.detectedLanguage?.rawValue.lowercased() ?? "",
+                clip.sourceApplication?.lowercased() ?? "",
+                clip.urlHostname?.lowercased() ?? ""
+            ].joined(separator: " ")
+            return words.allSatisfy { haystack.contains($0) }
+        }
+        return false
     }
 
     private func decodeClipRow(_ stmt: OpaquePointer?) -> ClipItem? {
@@ -515,9 +722,9 @@ public final class SQLiteStorageEngine: @unchecked Sendable {
         let colorComponents = columnText(stmt, 20).flatMap {
             try? JSONDecoder().decode(ColorComponents.self, from: Data($0.utf8))
         }
-        let urlHostname = columnText(stmt, 21)
+        let urlHostname = decryptOptionalField(columnText(stmt, 21))
         let isSuspicious = sqlite3_column_int(stmt, 22) != 0
-        let terminalWarning = columnText(stmt, 23)
+        let terminalWarning = decryptOptionalField(columnText(stmt, 23))
         let reasonsJSON = columnText(stmt, 24) ?? "[]"
         let reasons = (try? JSONDecoder().decode([String].self, from: Data(reasonsJSON.utf8))) ?? []
         let userOverrode = sqlite3_column_int(stmt, 25) != 0
@@ -660,6 +867,7 @@ public final class SQLiteStorageEngine: @unchecked Sendable {
                 try executeRawInternal("DELETE FROM clips;")
                 try executeRawInternal("DELETE FROM excluded_events;")
             }
+            try? executeRawInternal("PRAGMA wal_checkpoint(TRUNCATE);")
             try executeRawInternal("VACUUM;")
         }
     }
@@ -800,10 +1008,11 @@ public final class SQLiteStorageEngine: @unchecked Sendable {
             bindText(stmt, index: 8, value: clipID.uuidString)
             sqlite3_step(stmt)
 
+            let blindTokens = vault.blindIndexTokens(for: newContent)
             var ftsStmt: OpaquePointer?
             if sqlite3_prepare_v2(db, "UPDATE clips_fts SET searchable_text = ? WHERE clip_id = ?;", -1, &ftsStmt, nil) == SQLITE_OK {
                 defer { sqlite3_finalize(ftsStmt) }
-                bindText(ftsStmt, index: 1, value: newContent)
+                bindText(ftsStmt, index: 1, value: blindTokens)
                 bindText(ftsStmt, index: 2, value: clipID.uuidString)
                 sqlite3_step(ftsStmt)
             }
@@ -819,6 +1028,13 @@ public final class SQLiteStorageEngine: @unchecked Sendable {
             defer { sqlite3_finalize(stmt) }
             sqlite3_bind_double(stmt, 1, seconds)
             sqlite3_step(stmt)
+        }
+    }
+
+    /// Checkpoints the WAL file into the main database file so on-disk inspections and backups see a single consolidated file.
+    public func checkpointDatabase() {
+        queue.sync {
+            try? executeRawInternal("PRAGMA wal_checkpoint(TRUNCATE);")
         }
     }
 
@@ -877,12 +1093,13 @@ public final class SQLiteStorageEngine: @unchecked Sendable {
             let total = scalarInt("SELECT COUNT(*) FROM clips;")
             let pinned = scalarInt("SELECT COUNT(*) FROM clips WHERE is_pinned = 1;")
             let excluded = scalarInt("SELECT COUNT(*) FROM excluded_events;")
-            let size = (try? FileManager.default.attributesOfItem(atPath: databasePath)[.size] as? Int64) ?? 0
+            let mainSize = (try? FileManager.default.attributesOfItem(atPath: databasePath)[.size] as? Int64) ?? 0
+            let walSize = (try? FileManager.default.attributesOfItem(atPath: databasePath + "-wal")[.size] as? Int64) ?? 0
             return StorageStats(
                 totalClips: total,
                 pinnedClips: pinned,
                 excludedEventsCount: excluded,
-                databaseSizeBytes: size
+                databaseSizeBytes: mainSize + walSize
             )
         }
     }

@@ -502,8 +502,28 @@ public struct GhostPreferences: Codable, Equatable, Sendable {
     public var launchAtLogin: Bool
     public var showMenuBarIcon: Bool
     public var themeMode: String // "dark", "light", "system"
-    public var globalShortcutKeyCode: UInt32 // Option+Space default = 49 with optionKey
-    public var globalShortcutModifiers: UInt32
+    public var directPasteToActiveApp: Bool
+    public var hotkeyKeyCode: UInt32 {
+        didSet {
+            hotkeyDisplayString = ShortcutFormatter.displayString(keyCode: hotkeyKeyCode, carbonModifiers: hotkeyModifiers)
+        }
+    }
+    public var hotkeyModifiers: UInt32 {
+        didSet {
+            hotkeyDisplayString = ShortcutFormatter.displayString(keyCode: hotkeyKeyCode, carbonModifiers: hotkeyModifiers)
+        }
+    }
+    public var hotkeyDisplayString: String
+
+    // Backwards-compatible aliases
+    public var globalShortcutKeyCode: UInt32 {
+        get { hotkeyKeyCode }
+        set { hotkeyKeyCode = newValue }
+    }
+    public var globalShortcutModifiers: UInt32 {
+        get { hotkeyModifiers }
+        set { hotkeyModifiers = newValue }
+    }
 
     // Capture settings
     public var capturePlainText: Bool
@@ -537,8 +557,10 @@ public struct GhostPreferences: Codable, Equatable, Sendable {
         launchAtLogin: Bool = false,
         showMenuBarIcon: Bool = true,
         themeMode: String = "dark",
-        globalShortcutKeyCode: UInt32 = 49,
-        globalShortcutModifiers: UInt32 = 2048,
+        directPasteToActiveApp: Bool = false,
+        hotkeyKeyCode: UInt32 = 49,
+        hotkeyModifiers: UInt32 = 2048,
+        hotkeyDisplayString: String? = nil,
         capturePlainText: Bool = true,
         captureRichText: Bool = true,
         captureURLs: Bool = true,
@@ -565,8 +587,10 @@ public struct GhostPreferences: Codable, Equatable, Sendable {
         self.launchAtLogin = launchAtLogin
         self.showMenuBarIcon = showMenuBarIcon
         self.themeMode = themeMode
-        self.globalShortcutKeyCode = globalShortcutKeyCode
-        self.globalShortcutModifiers = globalShortcutModifiers
+        self.directPasteToActiveApp = directPasteToActiveApp
+        self.hotkeyKeyCode = hotkeyKeyCode
+        self.hotkeyModifiers = hotkeyModifiers
+        self.hotkeyDisplayString = hotkeyDisplayString ?? ShortcutFormatter.displayString(keyCode: hotkeyKeyCode, carbonModifiers: hotkeyModifiers)
         self.capturePlainText = capturePlainText
         self.captureRichText = captureRichText
         self.captureURLs = captureURLs
@@ -592,7 +616,9 @@ public struct GhostPreferences: Codable, Equatable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case launchAtLogin, showMenuBarIcon, themeMode, globalShortcutKeyCode, globalShortcutModifiers
+        case launchAtLogin, showMenuBarIcon, themeMode, directPasteToActiveApp
+        case hotkeyKeyCode, hotkeyModifiers, hotkeyDisplayString
+        case globalShortcutKeyCode, globalShortcutModifiers
         case capturePlainText, captureRichText, captureURLs, captureCode, ignoreDuplicates, maxItemSizeBytes, monitoringPaused
         case neverSavePasswords, neverSaveOTPs, neverSaveAPIKeys, allowEphemeralOTP, quarantinePotentiallySensitive
         case autoDeleteEphemeralItems, secretExpirationDurationSeconds, standardRetentionDays, requireAuthenticationToReveal, isAppLocked
@@ -604,8 +630,17 @@ public struct GhostPreferences: Codable, Equatable, Sendable {
         self.launchAtLogin = try c.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? false
         self.showMenuBarIcon = try c.decodeIfPresent(Bool.self, forKey: .showMenuBarIcon) ?? true
         self.themeMode = try c.decodeIfPresent(String.self, forKey: .themeMode) ?? "dark"
-        self.globalShortcutKeyCode = try c.decodeIfPresent(UInt32.self, forKey: .globalShortcutKeyCode) ?? 49
-        self.globalShortcutModifiers = try c.decodeIfPresent(UInt32.self, forKey: .globalShortcutModifiers) ?? 2048
+        self.directPasteToActiveApp = try c.decodeIfPresent(Bool.self, forKey: .directPasteToActiveApp) ?? false
+        let kc = try c.decodeIfPresent(UInt32.self, forKey: .hotkeyKeyCode)
+            ?? (try c.decodeIfPresent(UInt32.self, forKey: .globalShortcutKeyCode))
+            ?? 49
+        let mods = try c.decodeIfPresent(UInt32.self, forKey: .hotkeyModifiers)
+            ?? (try c.decodeIfPresent(UInt32.self, forKey: .globalShortcutModifiers))
+            ?? 2048
+        self.hotkeyKeyCode = kc
+        self.hotkeyModifiers = mods
+        self.hotkeyDisplayString = try c.decodeIfPresent(String.self, forKey: .hotkeyDisplayString)
+            ?? ShortcutFormatter.displayString(keyCode: kc, carbonModifiers: mods)
         self.capturePlainText = try c.decodeIfPresent(Bool.self, forKey: .capturePlainText) ?? true
         self.captureRichText = try c.decodeIfPresent(Bool.self, forKey: .captureRichText) ?? true
         self.captureURLs = try c.decodeIfPresent(Bool.self, forKey: .captureURLs) ?? true
@@ -628,6 +663,41 @@ public struct GhostPreferences: Codable, Equatable, Sendable {
         self.autoFormatJSONPreview = try c.decodeIfPresent(Bool.self, forKey: .autoFormatJSONPreview) ?? true
         self.hasCompletedOnboarding = try c.decodeIfPresent(Bool.self, forKey: .hasCompletedOnboarding) ?? false
         self.disabledCategories = try c.decodeIfPresent([ClipCategory].self, forKey: .disabledCategories) ?? []
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(launchAtLogin, forKey: .launchAtLogin)
+        try c.encode(showMenuBarIcon, forKey: .showMenuBarIcon)
+        try c.encode(themeMode, forKey: .themeMode)
+        try c.encode(directPasteToActiveApp, forKey: .directPasteToActiveApp)
+        try c.encode(hotkeyKeyCode, forKey: .hotkeyKeyCode)
+        try c.encode(hotkeyModifiers, forKey: .hotkeyModifiers)
+        try c.encode(hotkeyDisplayString, forKey: .hotkeyDisplayString)
+        try c.encode(hotkeyKeyCode, forKey: .globalShortcutKeyCode)
+        try c.encode(hotkeyModifiers, forKey: .globalShortcutModifiers)
+        try c.encode(capturePlainText, forKey: .capturePlainText)
+        try c.encode(captureRichText, forKey: .captureRichText)
+        try c.encode(captureURLs, forKey: .captureURLs)
+        try c.encode(captureCode, forKey: .captureCode)
+        try c.encode(ignoreDuplicates, forKey: .ignoreDuplicates)
+        try c.encode(maxItemSizeBytes, forKey: .maxItemSizeBytes)
+        try c.encode(monitoringPaused, forKey: .monitoringPaused)
+        try c.encode(neverSavePasswords, forKey: .neverSavePasswords)
+        try c.encode(neverSaveOTPs, forKey: .neverSaveOTPs)
+        try c.encode(neverSaveAPIKeys, forKey: .neverSaveAPIKeys)
+        try c.encode(allowEphemeralOTP, forKey: .allowEphemeralOTP)
+        try c.encode(quarantinePotentiallySensitive, forKey: .quarantinePotentiallySensitive)
+        try c.encode(autoDeleteEphemeralItems, forKey: .autoDeleteEphemeralItems)
+        try c.encode(secretExpirationDurationSeconds, forKey: .secretExpirationDurationSeconds)
+        try c.encode(standardRetentionDays, forKey: .standardRetentionDays)
+        try c.encode(requireAuthenticationToReveal, forKey: .requireAuthenticationToReveal)
+        try c.encode(isAppLocked, forKey: .isAppLocked)
+        try c.encode(enableCLIAccess, forKey: .enableCLIAccess)
+        try c.encode(syntaxHighlightingEnabled, forKey: .syntaxHighlightingEnabled)
+        try c.encode(autoFormatJSONPreview, forKey: .autoFormatJSONPreview)
+        try c.encode(hasCompletedOnboarding, forKey: .hasCompletedOnboarding)
+        try c.encode(disabledCategories, forKey: .disabledCategories)
     }
 
     public func isCategoryCaptureEnabled(_ category: ClipCategory) -> Bool {

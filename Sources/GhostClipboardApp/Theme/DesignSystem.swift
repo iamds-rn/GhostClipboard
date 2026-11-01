@@ -80,10 +80,33 @@ public extension GhostPreferences {
     }
 }
 
-// MARK: - Syntax Highlighting Helper for Code & JSON Previews
+// MARK: - Syntax Highlighting Helper for Code & JSON Previews (Bounded NSCache + Pre-Compiled RegexCache)
+
+private final class AttributedStringBox: NSObject {
+    let value: AttributedString
+    init(_ value: AttributedString) {
+        self.value = value
+    }
+}
 
 public enum SyntaxHighlighter {
+    private static let cache: NSCache<NSString, AttributedStringBox> = {
+        let c = NSCache<NSString, AttributedStringBox>()
+        c.countLimit = 64
+        c.totalCostLimit = 1024 * 1024
+        return c
+    }()
+
+    public static func clearCache() {
+        cache.removeAllObjects()
+    }
+
     public static func highlight(_ code: String, language: ProgrammingLanguage?, scheme: ColorScheme) -> AttributedString {
+        let key = "\(scheme == .dark ? "D" : "L"):\(language?.rawValue ?? "none"):\(CryptoVault.sha256Hex(code))" as NSString
+        if let cached = cache.object(forKey: key) {
+            return cached.value
+        }
+
         var attributed = AttributedString(code)
         attributed.font = .system(size: 12, weight: .regular, design: .monospaced)
         attributed.foregroundColor = GhostTheme.textPrimary(scheme)
@@ -97,11 +120,12 @@ public enum SyntaxHighlighter {
         applyPattern(#"'[^'\n]*'"#, to: &attributed, in: code, color: GhostTheme.success)
         applyPattern(#"(?m)//.*$|#.*$"#, to: &attributed, in: code, color: GhostTheme.textMuted(scheme))
 
+        cache.setObject(AttributedStringBox(attributed), forKey: key, cost: min(code.utf8.count, 32_768))
         return attributed
     }
 
     private static func applyPattern(_ pattern: String, to attributed: inout AttributedString, in source: String, color: Color) {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return }
+        guard let regex = RegexCache.shared.regex(for: pattern) else { return }
         let nsRange = NSRange(source.startIndex..<source.endIndex, in: source)
         let matches = regex.matches(in: source, options: [], range: nsRange)
         for match in matches.prefix(250) {

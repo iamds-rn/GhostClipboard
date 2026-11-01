@@ -35,6 +35,19 @@ public final class ContentClassificationEngine: Sendable {
             )
         }
 
+        // Fast-path bounded NSCache lookup for normal non-sensitive content
+        let cacheKey = CryptoVault.sha256Hex(trimmed)
+        if let cached = BoundedContentCache.shared.cachedClassification(forKey: cacheKey) {
+            return cached
+        }
+
+        let computed = computeNormalClassification(trimmed: trimmed)
+        BoundedContentCache.shared.storeClassification(computed, forKey: cacheKey, cost: min(trimmed.utf8.count, 16_384))
+        return computed
+    }
+
+    private func computeNormalClassification(trimmed: String) -> ClassificationResult {
+
         // 2. Check Color Formats (#FFF, #FFFFFF, #FFFFFFFF, 0xFFFFFF, rgb(), rgba(), hsl(), hsla())
         if let color = parseColor(from: trimmed) {
             return ClassificationResult(
@@ -554,31 +567,10 @@ public final class ContentClassificationEngine: Sendable {
     // MARK: - Regex Utilities
 
     private func matchesRegex(_ text: String, pattern: String) -> Bool {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
-            return false
-        }
-        let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        return regex.firstMatch(in: text, options: [], range: range) != nil
+        RegexCache.shared.matches(text, pattern: pattern)
     }
 
     private func firstRegexGroups(_ text: String, pattern: String) -> [String]? {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
-            return nil
-        }
-        let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        guard let match = regex.firstMatch(in: text, options: [], range: range) else {
-            return nil
-        }
-        var results: [String] = []
-        for idx in 0..<match.numberOfRanges {
-            let groupRange = match.range(at: idx)
-            if groupRange.location != NSNotFound,
-               let swiftRange = Range(groupRange, in: text) {
-                results.append(String(text[swiftRange]))
-            } else {
-                results.append("")
-            }
-        }
-        return results
+        RegexCache.shared.firstMatchGroups(text, pattern: pattern)
     }
 }

@@ -4,7 +4,7 @@ import Carbon
 import Combine
 import GhostClipboardCore
 
-// MARK: - Key-able Floating Panel for Option+Space Palette
+// MARK: - Key-able Floating Panel for Global Shortcut Palette
 
 public final class FloatingPalettePanel: NSPanel {
     public init(contentRect: NSRect) {
@@ -28,7 +28,7 @@ public final class FloatingPalettePanel: NSPanel {
     public override var canBecomeMain: Bool { true }
 }
 
-// MARK: - AppDelegate (Global Hotkey + Menu Bar + Window Management)
+// MARK: - AppDelegate (Dynamic Global Hotkey + Menu Bar + Window Management)
 
 @MainActor
 public final class GhostAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -36,19 +36,29 @@ public final class GhostAppDelegate: NSObject, NSApplicationDelegate, NSMenuDele
     private var floatingPanel: FloatingPalettePanel?
     private var settingsWindow: NSWindow?
     private var statusItem: NSStatusItem?
+    private var togglePaletteMenuItem: NSMenuItem?
     private var monitoringMenuItem: NSMenuItem?
     private var hotKeyRef: EventHotKeyRef?
+    private var hotKeyEventHandlerInstalled = false
+    private var registeredKeyCode: UInt32 = 0
+    private var registeredModifiers: UInt32 = 0
     private var cancellables = Set<AnyCancellable>()
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
 
+        coordinator.onMemoryPressureTrim = {
+            SyntaxHighlighter.clearCache()
+        }
         coordinator.seedSampleDeveloperClipsIfEmpty()
         coordinator.startMonitoring()
 
         setupMenuBarExtra()
         setupFloatingPalettePanel()
-        registerGlobalHotKey()
+        registerGlobalHotKey(
+            keyCode: coordinator.preferences.hotkeyKeyCode,
+            modifiers: coordinator.preferences.hotkeyModifiers
+        )
         observePreferences()
         applyThemeAppearance(coordinator.preferences.themeMode)
 
@@ -63,6 +73,7 @@ public final class GhostAppDelegate: NSObject, NSApplicationDelegate, NSMenuDele
         coordinator.stopMonitoring()
         if let ref = hotKeyRef {
             UnregisterEventHotKey(ref)
+            hotKeyRef = nil
         }
     }
 
@@ -74,6 +85,9 @@ public final class GhostAppDelegate: NSObject, NSApplicationDelegate, NSMenuDele
                 self.statusItem?.isVisible = prefs.showMenuBarIcon
                 self.updateMenuBarState(prefs: prefs)
                 self.applyThemeAppearance(prefs.themeMode)
+                if prefs.hotkeyKeyCode != self.registeredKeyCode || prefs.hotkeyModifiers != self.registeredModifiers {
+                    self.registerGlobalHotKey(keyCode: prefs.hotkeyKeyCode, modifiers: prefs.hotkeyModifiers)
+                }
             }
             .store(in: &cancellables)
     }
@@ -109,7 +123,15 @@ public final class GhostAppDelegate: NSObject, NSApplicationDelegate, NSMenuDele
 
         let menu = NSMenu()
         menu.delegate = self
-        menu.addItem(NSMenuItem(title: "Toggle Floating Palette (⌥Space)", action: #selector(toggleFloatingPalette), keyEquivalent: " "))
+
+        let toggleItem = NSMenuItem(
+            title: "Toggle Floating Palette (\(coordinator.preferences.hotkeyDisplayString))",
+            action: #selector(toggleFloatingPalette),
+            keyEquivalent: ""
+        )
+        menu.addItem(toggleItem)
+        self.togglePaletteMenuItem = toggleItem
+
         menu.addItem(NSMenuItem(title: "Open Full Workspace", action: #selector(openMainWorkspace), keyEquivalent: "1"))
         menu.addItem(NSMenuItem.separator())
 
@@ -117,6 +139,7 @@ public final class GhostAppDelegate: NSObject, NSApplicationDelegate, NSMenuDele
         menu.addItem(pauseItem)
         self.monitoringMenuItem = pauseItem
 
+        menu.addItem(NSMenuItem(title: "Generate & Copy UUID v4", action: #selector(generateUUIDNow), keyEquivalent: "u"))
         menu.addItem(NSMenuItem(title: "Clear System Clipboard Now", action: #selector(clearClipboardNow), keyEquivalent: "k"))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Settings…", action: #selector(openSettingsWindow), keyEquivalent: ","))
@@ -143,6 +166,9 @@ public final class GhostAppDelegate: NSObject, NSApplicationDelegate, NSMenuDele
             let symbol = prefs.monitoringPaused ? "shield.slash" : "shield.lefthalf.filled"
             button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "GhostClipboard")
         }
+        if let toggleItem = togglePaletteMenuItem {
+            toggleItem.title = "Toggle Floating Palette (\(prefs.hotkeyDisplayString))"
+        }
         if let pauseItem = monitoringMenuItem {
             pauseItem.title = prefs.monitoringPaused ? "Resume Monitoring (Paused)" : "Pause Monitoring"
             pauseItem.state = prefs.monitoringPaused ? .on : .off
@@ -158,6 +184,7 @@ public final class GhostAppDelegate: NSObject, NSApplicationDelegate, NSMenuDele
         if panel.isVisible {
             panel.orderOut(nil)
         } else {
+            coordinator.captureFrontmostExternalApplication()
             panel.center()
             panel.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -174,6 +201,10 @@ public final class GhostAppDelegate: NSObject, NSApplicationDelegate, NSMenuDele
 
     @objc public func toggleMonitoring() {
         coordinator.preferences.monitoringPaused.toggle()
+    }
+
+    @objc public func generateUUIDNow() {
+        _ = coordinator.generateAndCopyUUID()
     }
 
     @objc public func clearClipboardNow() {
@@ -223,40 +254,52 @@ public final class GhostAppDelegate: NSObject, NSApplicationDelegate, NSMenuDele
         self.floatingPanel = panel
     }
 
-    // MARK: - Global Carbon Hotkey Registration (Option + Space)
+    // MARK: - Dynamic Global Carbon Hotkey Registration
 
-    private func registerGlobalHotKey() {
-        var eventType = EventTypeSpec(
-            eventClass: OSType(kEventClassKeyboard),
-            eventKind: UInt32(kEventHotKeyPressed)
-        )
+    private func registerGlobalHotKey(keyCode: UInt32, modifiers: UInt32) {
+        if !hotKeyEventHandlerInstalled {
+            var eventType = EventTypeSpec(
+                eventClass: OSType(kEventClassKeyboard),
+                eventKind: UInt32(kEventHotKeyPressed)
+            )
 
-        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-        InstallEventHandler(
-            GetApplicationEventTarget(),
-            { _, _, userData -> OSStatus in
-                guard let userData = userData else { return noErr }
-                let delegate = Unmanaged<GhostAppDelegate>.fromOpaque(userData).takeUnretainedValue()
-                Task { @MainActor in
-                    delegate.toggleFloatingPalette()
-                }
-                return noErr
-            },
-            1,
-            &eventType,
-            selfPtr,
-            nil
-        )
+            let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+            InstallEventHandler(
+                GetApplicationEventTarget(),
+                { _, _, userData -> OSStatus in
+                    guard let userData = userData else { return noErr }
+                    let delegate = Unmanaged<GhostAppDelegate>.fromOpaque(userData).takeUnretainedValue()
+                    Task { @MainActor in
+                        delegate.toggleFloatingPalette()
+                    }
+                    return noErr
+                },
+                1,
+                &eventType,
+                selfPtr,
+                nil
+            )
+            hotKeyEventHandlerInstalled = true
+        }
+
+        if let existingRef = hotKeyRef {
+            UnregisterEventHotKey(existingRef)
+            hotKeyRef = nil
+        }
 
         let hotKeyID = EventHotKeyID(signature: OSType(0x47485354), id: 1) // 'GHST'
-        RegisterEventHotKey(
-            UInt32(kVK_Space),
-            UInt32(optionKey),
+        let status = RegisterEventHotKey(
+            keyCode,
+            modifiers,
             hotKeyID,
             GetApplicationEventTarget(),
             0,
             &hotKeyRef
         )
+        if status == noErr {
+            registeredKeyCode = keyCode
+            registeredModifiers = modifiers
+        }
     }
 }
 
@@ -282,6 +325,9 @@ struct GhostClipboardApp: App {
                 coordinator: appDelegate.coordinator,
                 onOpenSettings: {
                     appDelegate.openSettingsWindow()
+                },
+                onTogglePalette: {
+                    appDelegate.toggleFloatingPalette()
                 }
             )
         }
@@ -294,10 +340,15 @@ struct GhostClipboardApp: App {
                 .keyboardShortcut(",", modifiers: [.command])
             }
             CommandMenu("Clipboard") {
-                Button("Toggle Floating Palette") {
+                Button("Toggle Floating Palette (\(appDelegate.coordinator.preferences.hotkeyDisplayString))") {
                     appDelegate.toggleFloatingPalette()
                 }
                 .keyboardShortcut(" ", modifiers: [.option])
+
+                Button("Generate & Copy UUID v4") {
+                    appDelegate.generateUUIDNow()
+                }
+                .keyboardShortcut("u", modifiers: [.command, .shift])
 
                 Button(appDelegate.coordinator.preferences.monitoringPaused ? "Resume Monitoring" : "Pause Monitoring") {
                     appDelegate.toggleMonitoring()

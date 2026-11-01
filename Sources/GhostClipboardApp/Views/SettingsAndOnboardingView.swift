@@ -35,6 +35,10 @@ public struct SettingsWindowView: View {
     @State private var newBundleID: String = ""
     @State private var newAppName: String = ""
     @State private var confirmClearHistory: Bool = false
+    @State private var isRecordingShortcut: Bool = false
+    @State private var shortcutRecorderMonitor: Any? = nil
+    @State private var isAccessibilityTrusted: Bool = AccessibilityPasteHelper.isAccessibilityTrusted
+    @State private var telemetryRefreshTrigger: Int = 0
 
     public init(coordinator: ClipboardCoordinator) {
         self.coordinator = coordinator
@@ -48,6 +52,9 @@ public struct SettingsWindowView: View {
                     let isSelected = (selectedTab == tab)
                     Button {
                         selectedTab = tab
+                        if tab == .general {
+                            isAccessibilityTrusted = AccessibilityPasteHelper.isAccessibilityTrusted
+                        }
                     } label: {
                         HStack(spacing: 8) {
                             Image(systemName: tab.iconName)
@@ -110,25 +117,24 @@ public struct SettingsWindowView: View {
             }
             .background(GhostTheme.background(scheme))
         }
-        .frame(width: 700, height: 500)
+        .frame(width: 720, height: 540)
         .preferredColorScheme(coordinator.preferences.resolvedColorScheme)
+        .onAppear {
+            isAccessibilityTrusted = AccessibilityPasteHelper.isAccessibilityTrusted
+        }
+        .onDisappear {
+            stopShortcutRecording()
+        }
     }
 
-    // MARK: - 7.6.1 General
+    // MARK: - 7.6.1 General (Global Shortcut Recorder + Direct Paste & Accessibility)
 
     private var generalTab: some View {
         VStack(alignment: .leading, spacing: 16) {
-            sectionHeader("General Preferences", subtitle: "Configure startup behavior, menu bar visibility, global shortcut, and theme.")
+            sectionHeader("General Preferences", subtitle: "Configure startup behavior, menu bar visibility, global shortcut, direct paste, and theme.")
 
             Toggle("Launch GhostClipboard at login", isOn: $coordinator.preferences.launchAtLogin)
             Toggle("Show icon in macOS menu bar", isOn: $coordinator.preferences.showMenuBarIcon)
-
-            HStack {
-                Text("Global Floating Palette Shortcut")
-                    .font(GhostTheme.bodyFont)
-                Spacer()
-                KeycapBadge("⌥ Space")
-            }
 
             HStack {
                 Text("Appearance Theme")
@@ -142,6 +148,143 @@ public struct SettingsWindowView: View {
                 .pickerStyle(.segmented)
                 .frame(width: 240)
             }
+
+            Divider().overlay(GhostTheme.border(scheme))
+
+            // Global Shortcut Recorder Card
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Global Floating Palette Shortcut")
+                            .font(GhostTheme.bodyMedium)
+                            .foregroundColor(GhostTheme.textPrimary(scheme))
+                        Text("Summon GhostClipboard from any application. Switch presets if you use ⌥Space for Raycast or Alfred.")
+                            .font(GhostTheme.metadataFont)
+                            .foregroundColor(GhostTheme.textMuted(scheme))
+                    }
+                    Spacer()
+                    KeycapBadge(coordinator.preferences.hotkeyDisplayString)
+                    Button(isRecordingShortcut ? "Press keys… (Esc to cancel)" : "Record Shortcut…") {
+                        if isRecordingShortcut {
+                            stopShortcutRecording()
+                        } else {
+                            startShortcutRecording()
+                        }
+                    }
+                    .controlSize(.small)
+                }
+
+                HStack(spacing: 8) {
+                    Text("Quick Presets:")
+                        .font(GhostTheme.metadataFont)
+                        .foregroundColor(GhostTheme.textMuted(scheme))
+                    ForEach(ShortcutFormatter.presets) { preset in
+                        let isActive = coordinator.preferences.hotkeyKeyCode == preset.keyCode &&
+                                       coordinator.preferences.hotkeyModifiers == preset.carbonModifiers
+                        Button {
+                            stopShortcutRecording()
+                            var updated = coordinator.preferences
+                            updated.hotkeyKeyCode = preset.keyCode
+                            updated.hotkeyModifiers = preset.carbonModifiers
+                            updated.hotkeyDisplayString = preset.displayString
+                            coordinator.preferences = updated
+                        } label: {
+                            Text(preset.title)
+                                .font(.system(size: 11, weight: isActive ? .semibold : .regular, design: .monospaced))
+                                .foregroundColor(isActive ? GhostTheme.darkBackground : GhostTheme.textSecondary(scheme))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(isActive ? GhostTheme.accent : GhostTheme.elevated(scheme))
+                                .cornerRadius(4)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .padding(12)
+            .background(GhostTheme.surface(scheme))
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(isRecordingShortcut ? GhostTheme.accent : GhostTheme.border(scheme), lineWidth: 1)
+            )
+            .cornerRadius(6)
+
+            // Direct Paste & Accessibility Permission Card
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("Direct Paste into Active Application on ↩ / ⌘1–9 (Synthesize ⌘V)", isOn: $coordinator.preferences.directPasteToActiveApp)
+                    .font(GhostTheme.bodyMedium)
+
+                Text("When disabled (default), pressing ↩ copies the clip and reactivates your previous app without requiring Accessibility permissions. When enabled, GhostClipboard also synthesizes ⌘V after a 40ms activation delay.")
+                    .font(GhostTheme.metadataFont)
+                    .foregroundColor(GhostTheme.textMuted(scheme))
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 10) {
+                    Circle()
+                        .fill(isAccessibilityTrusted ? GhostTheme.success : GhostTheme.warning)
+                        .frame(width: 8, height: 8)
+                    Text(isAccessibilityTrusted ? "Accessibility Access: Granted (Direct ⌘V Paste Ready)" : "Accessibility Access: Not Granted (Copy-Only Fallback Active)")
+                        .font(GhostTheme.metadataFont)
+                        .foregroundColor(isAccessibilityTrusted ? GhostTheme.success : GhostTheme.warning)
+
+                    Spacer()
+
+                    if !isAccessibilityTrusted {
+                        Button("Request Accessibility Access") {
+                            isAccessibilityTrusted = AccessibilityPasteHelper.requestAccessibilityPermission(prompt: true)
+                            if !isAccessibilityTrusted {
+                                AccessibilityPasteHelper.openAccessibilitySystemSettings()
+                            }
+                        }
+                        .controlSize(.small)
+                    }
+
+                    Button("Refresh") {
+                        isAccessibilityTrusted = AccessibilityPasteHelper.isAccessibilityTrusted
+                    }
+                    .controlSize(.small)
+                }
+            }
+            .padding(12)
+            .background(GhostTheme.surface(scheme))
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(GhostTheme.border(scheme), lineWidth: 1)
+            )
+            .cornerRadius(6)
+        }
+    }
+
+    private func startShortcutRecording() {
+        stopShortcutRecording()
+        isRecordingShortcut = true
+        shortcutRecorderMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if event.keyCode == 53 { // Escape cancels recording
+                stopShortcutRecording()
+                return nil
+            }
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let carbonMods = ShortcutFormatter.carbonModifiers(from: flags)
+            // Require at least one modifier (Command, Option, Control, or Shift)
+            guard carbonMods != 0 else {
+                return nil
+            }
+            let keyCode = UInt32(event.keyCode)
+            var updated = coordinator.preferences
+            updated.hotkeyKeyCode = keyCode
+            updated.hotkeyModifiers = carbonMods
+            updated.hotkeyDisplayString = ShortcutFormatter.displayString(keyCode: keyCode, carbonModifiers: carbonMods)
+            coordinator.preferences = updated
+            stopShortcutRecording()
+            return nil
+        }
+    }
+
+    private func stopShortcutRecording() {
+        isRecordingShortcut = false
+        if let monitor = shortcutRecorderMonitor {
+            NSEvent.removeMonitor(monitor)
+            shortcutRecorderMonitor = nil
         }
     }
 
@@ -331,13 +474,15 @@ public struct SettingsWindowView: View {
         }
     }
 
-    // MARK: - 7.6.5 Storage
+    // MARK: - 7.6.5 Storage & Runtime Efficiency Telemetry
 
     private var storageTab: some View {
+        let _ = telemetryRefreshTrigger
         let stats = coordinator.storage.fetchStorageStats()
+        let telemetry = coordinator.runtimeEfficiencySnapshot()
         let formattedSize = ByteCountFormatter.string(fromByteCount: stats.databaseSizeBytes, countStyle: .file)
         return VStack(alignment: .leading, spacing: 16) {
-            sectionHeader("Encrypted Local Storage & Retention", subtitle: "All persisted clips are encrypted with AES-256-GCM using a key stored in the macOS Keychain.")
+            sectionHeader("Encrypted Local Storage & Runtime Efficiency", subtitle: "All persisted clips are encrypted with AES-256-GCM and indexed using HMAC-SHA256 blind tokens (zero plaintext on disk).")
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Database Path: \(coordinator.storage.databasePath)")
@@ -350,6 +495,44 @@ public struct SettingsWindowView: View {
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(GhostTheme.surface(scheme))
+            .cornerRadius(6)
+
+            // Live Runtime Efficiency & Telemetry Card
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Image(systemName: "gauge.with.dots.needle.33percent")
+                        .foregroundColor(GhostTheme.accent)
+                    Text("RUNTIME EFFICIENCY & TELEMETRY")
+                        .font(GhostTheme.badgeFont)
+                        .foregroundColor(GhostTheme.accent)
+                    Spacer()
+                    Button("Refresh Telemetry") {
+                        telemetryRefreshTrigger += 1
+                    }
+                    .controlSize(.mini)
+                    Button("Trim Memory & Caches Now") {
+                        coordinator.trimMemoryAndCachesNow()
+                        telemetryRefreshTrigger += 1
+                    }
+                    .controlSize(.mini)
+                }
+
+                VStack(spacing: 5) {
+                    telemetryMetricRow("Resident RAM Usage (mach_task_basic_info)", value: telemetry.formattedResidentMemory)
+                    telemetryMetricRow("SQLite Database Size (WAL + Main)", value: formattedSize)
+                    telemetryMetricRow("Ephemeral Countdown Timer", value: telemetry.ephemeralTimerStateText)
+                    telemetryMetricRow("Pasteboard Polling Engine", value: telemetry.pasteboardTimerStateText)
+                    telemetryMetricRow("Pre-Compiled RegexCache", value: "\(telemetry.regexCacheHits) hits • \(telemetry.cachedRegexCount) compiled patterns")
+                    telemetryMetricRow("Bounded NSCache Hits", value: "\(telemetry.classificationCacheHits) classification cache hits")
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(GhostTheme.surface(scheme))
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(GhostTheme.border(scheme), lineWidth: 1)
+            )
             .cornerRadius(6)
 
             HStack {
@@ -369,10 +552,19 @@ public struct SettingsWindowView: View {
             HStack(spacing: 12) {
                 Button("Purge Expired Clips Now") {
                     coordinator.purgeExpiredClipsNow()
+                    telemetryRefreshTrigger += 1
+                }
+
+                Button("Backup Master Key to Keychain") {
+                    let ok = CryptoVault.shared.backupMasterKeyToKeychain()
+                    coordinator.lastStatusBanner = ok
+                        ? "Master AES-256 key backed up to macOS Keychain"
+                        : "Master key active in 0600 ~/.ghostclipboard/.vault_key"
                 }
 
                 Button("Clear Unpinned History") {
                     coordinator.clearAllHistory(keepPinned: true)
+                    telemetryRefreshTrigger += 1
                 }
 
                 Button("Destroy All History & Logs", role: .destructive) {
@@ -382,11 +574,24 @@ public struct SettingsWindowView: View {
                     Button("Cancel", role: .cancel) {}
                     Button("Destroy Everything", role: .destructive) {
                         coordinator.clearAllHistory(keepPinned: false)
+                        telemetryRefreshTrigger += 1
                     }
                 } message: {
                     Text("This permanently deletes all encrypted clips, FTS indexes, and audit logs from SQLite.")
                 }
             }
+        }
+    }
+
+    private func telemetryMetricRow(_ label: String, value: String) -> some View {
+        HStack {
+            Text(label)
+                .font(GhostTheme.metadataFont)
+                .foregroundColor(GhostTheme.textMuted(scheme))
+            Spacer()
+            Text(value)
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundColor(GhostTheme.textPrimary(scheme))
         }
     }
 

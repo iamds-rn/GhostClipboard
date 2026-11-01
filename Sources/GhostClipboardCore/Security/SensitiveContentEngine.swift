@@ -358,10 +358,6 @@ public final class SensitiveContentEngine: Sendable {
     }
 
     private func matchesRegex(_ text: String, pattern: String) -> Bool {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
-            return false
-        }
-        let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        return regex.firstMatch(in: text, options: [], range: range) != nil
+        RegexCache.shared.matches(text, pattern: pattern)
     }
 }

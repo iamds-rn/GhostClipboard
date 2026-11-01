@@ -3,7 +3,7 @@ import Foundation
 public enum GhostCLIRunner {
     public static let knownCLISubcommands: Set<String> = [
         "status", "recent", "search", "list",
-        "enable-cli", "disable-cli",
+        "enable-cli", "disable-cli", "backup-key",
         "help", "--help", "-h",
         "version", "--version", "-v"
     ]
@@ -46,21 +46,35 @@ public enum GhostCLIRunner {
             return 0
 
         case "--version", "-v", "version":
-            print("ghostclipboard 1.0.0 (GhostClipboard Local Privacy Engine)")
+            print("ghostclipboard 1.1.0 (GhostClipboard Local Privacy Engine)")
             return 0
 
         case "status":
             let stats = resolvedStorage.fetchStorageStats()
+            let ramMB = Double(RuntimeMemoryMonitor.currentResidentMemoryBytes()) / (1024.0 * 1024.0)
             print("GhostClipboard Status")
             print("─────────────────────")
             print("Monitoring:          \(prefs.monitoringPaused ? "Paused" : "Active")")
+            print("Global Shortcut:     \(prefs.hotkeyDisplayString)")
+            print("Direct Paste (⌘V):   \(prefs.directPasteToActiveApp ? "Enabled" : "Disabled (Copy-Only)")")
             print("CLI Access Enabled:  \(prefs.enableCLIAccess ? "Yes" : "No (Enable in Settings → Developer Tools or run 'ghostclipboard enable-cli')")")
-            print("Encryption:          AES-256-GCM (Keychain-backed)")
+            print("Encryption:          AES-256-GCM + HMAC-SHA256 Blind FTS Index (Zero Plaintext On Disk)")
             print("Persisted Clips:     \(stats.totalClips) (\(stats.pinnedClips) pinned)")
             print("Blocked Secrets:     \(stats.excludedEventsCount)")
             print("Database Size:       \(formatBytes(stats.databaseSizeBytes))")
+            print("Resident Memory:     \(String(format: "%.1f MB", ramMB))")
             print("Database Path:       \(resolvedStorage.databasePath)")
             return 0
+
+        case "backup-key":
+            let ok = CryptoVault.shared.backupMasterKeyToKeychain()
+            if ok {
+                print("Master AES-256 vault key backed up to macOS Keychain.")
+                return 0
+            } else {
+                print("Master AES-256 vault key is active at \(CryptoVault.localKeyFileURL().path) (0600).")
+                return 0
+            }
 
         case "enable-cli":
             var updated = prefs

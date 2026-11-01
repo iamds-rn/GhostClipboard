@@ -7,23 +7,33 @@ struct GhostClipboardTestRunner {
     private static var passedCount = 0
     private static var failedCount = 0
 
-    static func assertTrue(_ condition: @autoclosure () -> Bool, _ message: String = "", file: String = #file, line: Int = #line) {
-        if condition() {
-            passedCount += 1
-        } else {
+    static func assertTrue(_ condition: @autoclosure () throws -> Bool, _ message: String = "", file: String = #file, line: Int = #line) {
+        do {
+            if try condition() {
+                passedCount += 1
+            } else {
+                failedCount += 1
+                fputs("❌ Assertion failed at \(file):\(line) — \(message)\n", stderr)
+            }
+        } catch {
             failedCount += 1
-            fputs("❌ Assertion failed at \(file):\(line) — \(message)\n", stderr)
+            fputs("❌ Assertion threw error at \(file):\(line) — \(error). \(message)\n", stderr)
         }
     }
 
-    static func assertEqual<T: Equatable>(_ lhs: @autoclosure () -> T, _ rhs: @autoclosure () -> T, _ message: String = "", file: String = #file, line: Int = #line) {
-        let l = lhs()
-        let r = rhs()
-        if l == r {
-            passedCount += 1
-        } else {
+    static func assertEqual<T: Equatable>(_ lhs: @autoclosure () throws -> T, _ rhs: @autoclosure () throws -> T, _ message: String = "", file: String = #file, line: Int = #line) {
+        do {
+            let l = try lhs()
+            let r = try rhs()
+            if l == r {
+                passedCount += 1
+            } else {
+                failedCount += 1
+                fputs("❌ Assertion failed at \(file):\(line) — Expected \(r), got \(l). \(message)\n", stderr)
+            }
+        } catch {
             failedCount += 1
-            fputs("❌ Assertion failed at \(file):\(line) — Expected \(r), got \(l). \(message)\n", stderr)
+            fputs("❌ Assertion threw error at \(file):\(line) — \(error). \(message)\n", stderr)
         }
     }
 
@@ -441,6 +451,292 @@ struct GhostClipboardTestRunner {
             assertEqual(GhostCLIRunner.run(arguments: ["list", "--category", "code", "--limit", "2", "--json"], storage: regDB), 0)
             assertEqual(GhostCLIRunner.run(arguments: ["list", "--category", "invalid_cat"], storage: regDB), 1)
             assertEqual(GhostCLIRunner.run(arguments: ["unknown-cmd"], storage: regDB), 1)
+            assertEqual(GhostCLIRunner.run(arguments: ["backup-key"], storage: regDB), 0)
+
+            // 12. Zero-Plaintext On-Disk SQLite Search Index (HMAC-SHA256 Blind Indexing Verification)
+            do {
+                let blindURL = URL(fileURLWithPath: NSTemporaryDirectory())
+                    .appendingPathComponent("ghost_blind_\(UUID().uuidString).sqlite3")
+                defer {
+                    try? FileManager.default.removeItem(at: blindURL)
+                    try? FileManager.default.removeItem(atPath: blindURL.path + "-wal")
+                    try? FileManager.default.removeItem(atPath: blindURL.path + "-shm")
+                }
+
+                let blindDB = try SQLiteStorageEngine(databaseURL: blindURL, vault: vault)
+
+                let canaryCode = "func calculateQuantumSignature(payload: Data) -> String { return \"UniqueCanaryPlaintextToken98765\" }"
+                let canaryURL = "https://internal-portal.corp.example.com/v2/dashboard?env=.env"
+                let canaryColor = "#FF5733"
+                let canaryOperator = "if (a === b && status !== 0) { console.log('strict equality'); }"
+
+                try blindDB.saveClip(ClipItem(
+                    content: canaryCode,
+                    contentHash: CryptoVault.sha256Hex(canaryCode),
+                    primaryCategory: .code,
+                    detectedLanguage: .swift,
+                    sourceApplication: "Xcode"
+                ))
+                try blindDB.saveClip(ClipItem(
+                    content: canaryURL,
+                    contentHash: CryptoVault.sha256Hex(canaryURL),
+                    primaryCategory: .url,
+                    urlHostname: "internal-portal.corp.example.com"
+                ))
+                try blindDB.saveClip(ClipItem(
+                    content: canaryColor,
+                    contentHash: CryptoVault.sha256Hex(canaryColor),
+                    primaryCategory: .hexColor
+                ))
+                try blindDB.saveClip(ClipItem(
+                    content: canaryOperator,
+                    contentHash: CryptoVault.sha256Hex(canaryOperator),
+                    primaryCategory: .code,
+                    detectedLanguage: .javascript
+                ))
+
+                // Consolidate WAL into main SQLite file and inspect raw bytes on disk
+                blindDB.checkpointDatabase()
+                let rawSQLiteBytes = try Data(contentsOf: blindURL)
+                let rawWALBytes = (try? Data(contentsOf: URL(fileURLWithPath: blindURL.path + "-wal"))) ?? Data()
+                let combinedDiskBytes = rawSQLiteBytes + rawWALBytes
+
+                let forbiddenPlaintexts = [
+                    "calculateQuantumSignature",
+                    "UniqueCanaryPlaintextToken98765",
+                    "internal-portal.corp.example.com",
+                    "strict equality",
+                    "#FF5733"
+                ]
+                for forbidden in forbiddenPlaintexts {
+                    let needle = Data(forbidden.utf8)
+                    assertNil(
+                        combinedDiskBytes.range(of: needle),
+                        "Raw SQLite file on disk MUST NOT contain plaintext '\(forbidden)'"
+                    )
+                }
+
+                // Verify blind index tokens start with "bi_" and contain zero plaintext
+                let generatedTokens = vault.blindIndexTokens(for: canaryCode)
+                assertTrue(generatedTokens.hasPrefix("bi_"), "Blind index tokens must start with bi_")
+                assertTrue(!generatedTokens.contains("calculate"), "Blind index tokens must not contain plaintext words")
+
+                // Verify exact word, camelCase subword, 3+ char prefix, mid-word substring, and symbol searches all succeed!
+                assertEqual(try blindDB.searchClips("calculateQuantumSignature").count, 1)
+                assertEqual(try blindDB.searchClips("UniqueCanaryPlaintextToken98765").count, 1)
+                assertEqual(try blindDB.searchClips("quantum").count, 1, "CamelCase subword search must succeed via blind index")
+                assertEqual(try blindDB.searchClips("calc").count, 1, "3+ char prefix search must succeed via blind index")
+                assertEqual(try blindDB.searchClips("QuantumSig").count, 1, "Mid-word substring search must succeed via hybrid decrypted scan")
+                assertEqual(try blindDB.searchClips("#FF5733").count, 1, "Hex color symbol search must succeed")
+                assertEqual(try blindDB.searchClips("===").count, 1, "Operator symbol search must succeed")
+                assertEqual(try blindDB.searchClips(".env").count, 1, "Dotfile symbol search must succeed")
+                assertEqual(try blindDB.searchClips("internal-portal.corp.example.com").count, 1, "Encrypted hostname search must succeed")
+                assertEqual(try blindDB.searchClips("nonexistent_token_xyz_999").count, 0)
+            }
+
+            // 13. Persistent SQLite Connection Concurrency & 100-Clip Benchmark
+            do {
+                let benchURL = URL(fileURLWithPath: NSTemporaryDirectory())
+                    .appendingPathComponent("ghost_bench_\(UUID().uuidString).sqlite3")
+                defer {
+                    try? FileManager.default.removeItem(at: benchURL)
+                    try? FileManager.default.removeItem(atPath: benchURL.path + "-wal")
+                    try? FileManager.default.removeItem(atPath: benchURL.path + "-shm")
+                }
+
+                let benchDB = try SQLiteStorageEngine(databaseURL: benchURL, vault: vault)
+                var batchClips: [ClipItem] = []
+                for idx in 0..<100 {
+                    let text = "func benchmarkFunction_\(idx)(arg: Int) -> Int { return arg * \(idx) }"
+                    batchClips.append(ClipItem(
+                        content: text,
+                        contentHash: CryptoVault.sha256Hex(text),
+                        primaryCategory: .code,
+                        detectedLanguage: .swift
+                    ))
+                }
+
+                let startTime = CFAbsoluteTimeGetCurrent()
+                try benchDB.saveClipsBatch(batchClips)
+                let elapsed = CFAbsoluteTimeGetCurrent() - startTime
+                assertTrue(elapsed < 2.0, "100 clip encrypt+insert+blind-index batch took \(elapsed)s (expected < 2.0s)")
+                assertEqual(benchDB.fetchStorageStats().totalClips, 100)
+                assertEqual(try benchDB.searchClips("benchmarkFunction_77").count, 1)
+            }
+
+            // 14. Pre-Compiled RegexCache & BoundedContentCache Verification
+            do {
+                let beforeStats = RegexCache.shared.stats
+                _ = RegexCache.shared.matches("sk-proj-1234567890abcdefghijklmnopqrstuvwxyzABCD", pattern: #"(?:^|[^A-Za-z0-9_-])sk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{28,255}"#)
+                _ = RegexCache.shared.matches("sk-proj-1234567890abcdefghijklmnopqrstuvwxyzABCD", pattern: #"(?:^|[^A-Za-z0-9_-])sk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{28,255}"#)
+                let afterStats = RegexCache.shared.stats
+                assertTrue(afterStats.hits >= beforeStats.hits + 1, "Expected RegexCache hits to increment")
+                assertTrue(afterStats.count > 0, "Expected non-zero compiled regex count")
+
+                // Edge cases: empty string and invalid regex pattern
+                assertEqual(RegexCache.shared.matches("", pattern: #"^[0-9]+$"#), false)
+                assertNil(RegexCache.shared.regex(for: "[unclosed_group"))
+
+                // BoundedContentCache hit verification
+                let sampleSnippet = "SELECT id, email FROM users WHERE active = 1 ORDER BY id DESC;"
+                _ = classifier.classify(content: sampleSnippet)
+                let cHitsBefore = BoundedContentCache.shared.stats.hits
+                let cachedRes = classifier.classify(content: sampleSnippet)
+                let cHitsAfter = BoundedContentCache.shared.stats.hits
+                assertEqual(cachedRes.primaryCategory, .code)
+                assertEqual(cachedRes.detectedLanguage, .sql)
+                assertEqual(cHitsAfter, cHitsBefore + 1, "Expected BoundedContentCache hit on repeated classification")
+            }
+
+            // 15. Zero-Idle-Wake Ephemeral Timer Lifecycle & Sleep/Wake Awareness
+            do {
+                let timerURL = URL(fileURLWithPath: NSTemporaryDirectory())
+                    .appendingPathComponent("ghost_timer_\(UUID().uuidString).sqlite3")
+                defer { try? FileManager.default.removeItem(at: timerURL) }
+                let timerDB = try SQLiteStorageEngine(databaseURL: timerURL, vault: vault)
+                let timerCoord = ClipboardCoordinator(storage: timerDB)
+
+                // Initially ephemeralClips is empty -> timer MUST be inactive (0 Hz)
+                assertEqual(timerCoord.ephemeralClips.count, 0)
+                assertEqual(timerCoord.isEphemeralTimerActive, false, "Ephemeral countdown timer must be nil/inactive when ephemeralClips is empty")
+                assertEqual(timerCoord.runtimeEfficiencySnapshot().ephemeralTimerStateText, "Idle (0 Hz — Zero Wake)")
+
+                // Enable ephemeral OTP capture and ingest an OTP -> timer MUST activate
+                timerCoord.preferences.neverSaveOTPs = false
+                timerCoord.preferences.allowEphemeralOTP = true
+                let t0 = Date()
+                let disp = timerCoord.ingestClipboardContent("Your verification code is 654321", now: t0)
+                assertEqual(disp, .memoryOnlyEphemeral)
+                assertEqual(timerCoord.ephemeralClips.count, 1)
+                assertEqual(timerCoord.isEphemeralTimerActive, true, "Ephemeral timer must activate immediately when an ephemeral clip is captured")
+                assertTrue(timerCoord.runtimeEfficiencySnapshot().ephemeralTimerStateText.contains("Counting down"))
+
+                // Expire the OTP -> timer MUST automatically stop and return to 0 Hz idle
+                timerCoord.runRetentionCycle(now: t0.addingTimeInterval(130))
+                assertEqual(timerCoord.ephemeralClips.count, 0)
+                assertEqual(timerCoord.isEphemeralTimerActive, false, "Ephemeral timer must automatically cancel once ephemeralClips becomes empty")
+
+                // Sleep / Wake awareness
+                timerCoord.startMonitoring()
+                assertEqual(timerCoord.isSleepingOrScreenLocked, false)
+                timerCoord.handleSystemWillSleep()
+                assertEqual(timerCoord.isSleepingOrScreenLocked, true)
+                assertEqual(timerCoord.runtimeEfficiencySnapshot().isPasteboardPollingPaused, true)
+                timerCoord.handleSystemDidWake()
+                assertEqual(timerCoord.isSleepingOrScreenLocked, false)
+                assertEqual(timerCoord.runtimeEfficiencySnapshot().isPasteboardPollingPaused, false)
+                timerCoord.stopMonitoring()
+
+                // Resident memory telemetry sanity check
+                let snap = timerCoord.runtimeEfficiencySnapshot()
+                assertTrue(snap.residentMemoryBytes > 0, "Expected non-zero resident memory bytes from mach_task_basic_info")
+                assertTrue(snap.residentMemoryMB > 0.5 && snap.residentMemoryMB < 2048.0, "Expected reasonable resident RAM in MB")
+            }
+
+            // 16. Custom Global Shortcut Preferences & Display Formatting + Direct Paste Preference
+            do {
+                assertEqual(ShortcutFormatter.displayString(keyCode: 49, carbonModifiers: ShortcutFormatter.carbonOptionKey), "⌥Space")
+                assertEqual(ShortcutFormatter.displayString(keyCode: 9, carbonModifiers: ShortcutFormatter.carbonShiftKey | ShortcutFormatter.carbonCmdKey), "⇧⌘V")
+                assertEqual(ShortcutFormatter.displayString(keyCode: 49, carbonModifiers: ShortcutFormatter.carbonControlKey | ShortcutFormatter.carbonOptionKey), "⌃⌥Space")
+                assertEqual(ShortcutFormatter.displayString(keyCode: 9, carbonModifiers: ShortcutFormatter.carbonControlKey | ShortcutFormatter.carbonShiftKey), "⌃⇧V")
+
+                var prefs = GhostPreferences()
+                assertEqual(prefs.hotkeyKeyCode, 49)
+                assertEqual(prefs.hotkeyModifiers, 2048)
+                assertEqual(prefs.hotkeyDisplayString, "⌥Space")
+                assertEqual(prefs.directPasteToActiveApp, false)
+
+                // Updating hotkeyKeyCode / hotkeyModifiers automatically updates hotkeyDisplayString
+                prefs.hotkeyKeyCode = 9
+                prefs.hotkeyModifiers = ShortcutFormatter.carbonShiftKey | ShortcutFormatter.carbonCmdKey
+                assertEqual(prefs.hotkeyDisplayString, "⇧⌘V")
+                prefs.directPasteToActiveApp = true
+
+                try regDB.savePreferences(prefs)
+                let reloaded = regDB.loadPreferences()
+                assertEqual(reloaded.hotkeyKeyCode, 9)
+                assertEqual(reloaded.hotkeyModifiers, ShortcutFormatter.carbonShiftKey | ShortcutFormatter.carbonCmdKey)
+                assertEqual(reloaded.hotkeyDisplayString, "⇧⌘V")
+                assertEqual(reloaded.directPasteToActiveApp, true)
+            }
+
+            // 17. New Developer Actions: JWT Inspector, Base64 Encode/Decode, cURL -> JS fetch / Swift URLRequest, Timestamps, Markdown Fence, Paste Stack
+            do {
+                // 17a. JWT Inspector
+                let sampleJWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyXzQyIiwiaXNzIjoiZ2hvc3RjbGlwYm9hcmQiLCJleHAiOjE4OTM0NTYwMDAsImlhdCI6MTcwMDAwMDAwMH0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+                let decodedJWT = actionsEngine.decodeJWT("Bearer " + sampleJWT, now: Date(timeIntervalSince1970: 1_750_000_000))
+                assertNotNil(decodedJWT, "Expected 3-part JWT with Bearer prefix to decode")
+                assertEqual(decodedJWT?.algorithm, "HS256")
+                assertEqual(decodedJWT?.subject, "user_42")
+                assertEqual(decodedJWT?.issuer, "ghostclipboard")
+                assertEqual(decodedJWT?.isExpired, false)
+                assertTrue(decodedJWT?.claimsJSON.contains("user_42") == true)
+
+                let jwtClip = ClipItem(
+                    content: sampleJWT,
+                    contentHash: CryptoVault.sha256Hex(sampleJWT),
+                    primaryCategory: .credential,
+                    sensitivityLevel: .ephemeralSecret,
+                    isEphemeral: true
+                )
+                let jwtActions = actionsEngine.availableActions(for: jwtClip)
+                assertTrue(jwtActions.contains(where: { $0.id == "jwt.decode" }), "Expected jwt.decode action for JWT clip")
+
+                // 17b. Base64 Encode & Decode
+                let originalText = "GhostClipboard-ZeroPlaintext-Index-2026"
+                let b64 = actionsEngine.base64Encode(originalText)
+                assertEqual(actionsEngine.base64Decode(b64), originalText)
+                assertNil(actionsEngine.base64Decode("hello"), "Short plain English word without padding must not be treated as Base64")
+
+                // 17c. cURL -> JS fetch() & Swift URLRequest
+                let curlCmd = """
+                curl -X POST https://api.example.com/v1/embeddings \\
+                  -H "Authorization: Bearer tok_123" \\
+                  -H "Content-Type: application/json" \\
+                  -d '{"input":"clipboard text","model":"embed-small"}'
+                """
+                let jsFetch = actionsEngine.convertCurlToJSFetch(curlCmd)
+                assertNotNil(jsFetch)
+                assertTrue(jsFetch?.contains("fetch(\"https://api.example.com/v1/embeddings\"") == true)
+                assertTrue(jsFetch?.contains("method: \"POST\"") == true)
+                assertTrue(jsFetch?.contains("\"Authorization\": \"Bearer tok_123\"") == true)
+
+                let swiftReq = actionsEngine.convertCurlToSwiftURLRequest(curlCmd)
+                assertNotNil(swiftReq)
+                assertTrue(swiftReq?.contains("URLRequest(url: url)") == true)
+                assertTrue(swiftReq?.contains("request.httpMethod = \"POST\"") == true)
+                assertTrue(swiftReq?.contains("forHTTPHeaderField: \"Authorization\"") == true)
+
+                let curlActions = actionsEngine.terminalActions(for: curlCmd)
+                assertTrue(curlActions.contains(where: { $0.id == "curl.to_fetch" }))
+                assertTrue(curlActions.contains(where: { $0.id == "curl.to_swift" }))
+
+                // 17d. Unix Epoch & ISO-8601 Timestamp Converter
+                let tsSec = actionsEngine.parseTimestamp("1700000000")
+                assertNotNil(tsSec)
+                assertEqual(tsSec?.epochSeconds, 1_700_000_000)
+                assertEqual(tsSec?.epochMilliseconds, 1_700_000_000_000)
+                assertEqual(tsSec?.iso8601UTC, "2023-11-14T22:13:20Z")
+
+                let tsMs = actionsEngine.parseTimestamp("1700000000000")
+                assertEqual(tsMs?.iso8601UTC, "2023-11-14T22:13:20Z")
+
+                let tsISO = actionsEngine.parseTimestamp("2023-11-14T22:13:20Z")
+                assertEqual(tsISO?.epochSeconds, 1_700_000_000)
+
+                assertNil(actionsEngine.parseTimestamp("42"), "Small integer must not be parsed as Unix timestamp")
+
+                // 17e. Markdown Code Fence & Paste Stack / UUID Generator
+                let fencedSwift = actionsEngine.formatAsMarkdownCodeFence("let x = 1", language: .swift, category: .code)
+                assertEqual(fencedSwift, "```swift\nlet x = 1\n```")
+
+                let genUUID = regCoord.generateAndCopyUUID()
+                assertEqual(genUUID.count, 36)
+                assertNotNil(UUID(uuidString: genUUID))
+
+                let mergedRecent = regCoord.copyMergedClips(pinnedOnly: false, limit: 2, separator: "\n---\n")
+                assertTrue(!mergedRecent.isEmpty && mergedRecent.contains("\n---\n"))
+            }
         } catch {
             failedCount += 1
             fputs("❌ Unexpected error during storage/coordinator tests: \(error)\n", stderr)

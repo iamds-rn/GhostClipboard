@@ -9,7 +9,11 @@ public final class ClipboardCoordinator: ObservableObject {
     // MARK: - Published State for UI
 
     @Published public private(set) var persistentClips: [ClipItem] = []
-    @Published public private(set) var ephemeralClips: [ClipItem] = []
+    @Published public private(set) var ephemeralClips: [ClipItem] = [] {
+        didSet {
+            updateEphemeralTimerLifecycle()
+        }
+    }
     @Published public private(set) var excludedEvents: [ExcludedCaptureEvent] = []
     @Published public private(set) var applicationExclusions: [ApplicationExclusion] = []
     @Published public var preferences: GhostPreferences {
@@ -20,6 +24,9 @@ public final class ClipboardCoordinator: ObservableObject {
     @Published public var searchQuery: String = ""
     @Published public var selectedCategoryFilter: ClipCategory? = nil
     @Published public var lastStatusBanner: String? = nil
+    @Published public private(set) var lastExternalApplication: NSRunningApplication? = nil
+    @Published public private(set) var isSleepingOrScreenLocked: Bool = false
+    @Published public private(set) var isBackgroundCoalesced: Bool = false
 
     // MARK: - Engines
 
@@ -28,12 +35,29 @@ public final class ClipboardCoordinator: ObservableObject {
     public let securityEngine = SensitiveContentEngine()
     public let actionsEngine = DeveloperActionsEngine()
 
-    private var pasteboardTimer: Timer?
-    private var expirationTimer: Timer?
+    // MARK: - Low-Power Coalesced Timers & Memory Pressure Source
+
+    private var pasteboardTimer: DispatchSourceTimer?
+    private var ephemeralCountdownTimer: DispatchSourceTimer?
+    private var dbMaintenanceTimer: DispatchSourceTimer?
+    private var memoryPressureSource: DispatchSourceMemoryPressure?
+    private var workspaceObservers: [NSObjectProtocol] = []
+    private var appObservers: [NSObjectProtocol] = []
+
+    private var currentPollInterval: TimeInterval = 0.45
+    private var isMonitoringRequested: Bool = false
     private var lastChangeCount: Int = 0
     private var internalWriteChangeCount: Int? = nil
     private var lastPreferencesUpdatedAt: TimeInterval = 0
     private var isInternalPreferencesMutation: Bool = false
+
+    public var onMemoryPressureTrim: (() -> Void)? = nil
+
+    /// True ONLY when `ephemeralClips` is non-empty and the 1.0s countdown timer is actively ticking.
+    /// Zero idle wakeups occur when `ephemeralClips` is empty!
+    public var isEphemeralTimerActive: Bool {
+        ephemeralCountdownTimer != nil
+    }
 
     public init(storage: SQLiteStorageEngine? = nil) {
         let resolvedStorage = (try? (storage ?? SQLiteStorageEngine())) ?? {
@@ -45,6 +69,22 @@ public final class ClipboardCoordinator: ObservableObject {
         self.preferences = loaded.preferences
         self.lastPreferencesUpdatedAt = loaded.updatedAt
         reloadAllData()
+        setupMemoryPressureHandling()
+        setupWorkspaceAndSleepWakeObservers()
+        captureFrontmostExternalApplication()
+    }
+
+    deinit {
+        pasteboardTimer?.cancel()
+        ephemeralCountdownTimer?.cancel()
+        dbMaintenanceTimer?.cancel()
+        memoryPressureSource?.cancel()
+        for obs in workspaceObservers {
+            NSWorkspace.shared.notificationCenter.removeObserver(obs)
+        }
+        for obs in appObservers {
+            NotificationCenter.default.removeObserver(obs)
+        }
     }
 
     // MARK: - Reactive Preferences Side-Effects & Multi-Process Sync
@@ -58,6 +98,12 @@ public final class ClipboardCoordinator: ObservableObject {
             adjusted.allowEphemeralOTP = !newValue.neverSaveOTPs
         } else if oldValue.allowEphemeralOTP != newValue.allowEphemeralOTP && oldValue.neverSaveOTPs == newValue.neverSaveOTPs {
             adjusted.neverSaveOTPs = !newValue.allowEphemeralOTP
+        }
+
+        // Ensure hotkeyDisplayString stays synchronized with hotkeyKeyCode + hotkeyModifiers
+        let expectedDisplay = ShortcutFormatter.displayString(keyCode: adjusted.hotkeyKeyCode, carbonModifiers: adjusted.hotkeyModifiers)
+        if adjusted.hotkeyDisplayString != expectedDisplay {
+            adjusted.hotkeyDisplayString = expectedDisplay
         }
 
         // Sync capture toggles with disabledCategories so Capture tab and Categories tab stay in lockstep
@@ -95,6 +141,10 @@ public final class ClipboardCoordinator: ObservableObject {
         if oldValue.monitoringPaused != adjusted.monitoringPaused {
             lastChangeCount = NSPasteboard.general.changeCount
             lastStatusBanner = adjusted.monitoringPaused ? "Clipboard monitoring paused" : "Clipboard monitoring active"
+        } else if oldValue.hotkeyKeyCode != adjusted.hotkeyKeyCode || oldValue.hotkeyModifiers != adjusted.hotkeyModifiers {
+            lastStatusBanner = "Global shortcut updated to \(adjusted.hotkeyDisplayString)"
+        } else if oldValue.directPasteToActiveApp != adjusted.directPasteToActiveApp {
+            lastStatusBanner = adjusted.directPasteToActiveApp ? "Direct paste into active app enabled" : "Direct paste disabled (Copy only)"
         } else if oldValue.launchAtLogin != adjusted.launchAtLogin {
             applyLaunchAtLogin(adjusted.launchAtLogin)
         } else if oldValue.showMenuBarIcon != adjusted.showMenuBarIcon {
@@ -176,7 +226,6 @@ public final class ClipboardCoordinator: ObservableObject {
                     try SMAppService.mainApp.unregister()
                 }
             } catch {
-                // SMAppService may require signed bundle in /Applications; fall back to LaunchAgent plist
                 updateLaunchAgentPlist(enabled: enabled)
             }
         }
@@ -212,44 +261,262 @@ public final class ClipboardCoordinator: ObservableObject {
         }
     }
 
-    // MARK: - Monitoring Lifecycle
+    // MARK: - Active External Application Tracking (For Direct Paste Synthesis)
 
-    public func startMonitoring(pollInterval: TimeInterval = 0.45) {
-        lastChangeCount = NSPasteboard.general.changeCount
+    public func captureFrontmostExternalApplication() {
+        guard let front = NSWorkspace.shared.frontmostApplication else { return }
+        let myBundleID = Bundle.main.bundleIdentifier ?? "com.ghostclipboard.macos"
+        let frontBundle = front.bundleIdentifier ?? ""
+        let frontName = front.localizedName ?? ""
+        if frontBundle != myBundleID && frontName != "GhostClipboard" && front.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+            lastExternalApplication = front
+        }
+    }
 
-        pasteboardTimer?.invalidate()
-        pasteboardTimer = Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { [weak self] _ in
+    // MARK: - Sleep/Wake & App Activation Observers + Memory Pressure Handling
+
+    private func setupWorkspaceAndSleepWakeObservers() {
+        let wsCenter = NSWorkspace.shared.notificationCenter
+
+        let activateObs = wsCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             Task { @MainActor [weak self] in
-                self?.checkPasteboardIfNeeded()
+                guard let self = self else { return }
+                let myBundleID = Bundle.main.bundleIdentifier ?? "com.ghostclipboard.macos"
+                if app.bundleIdentifier != myBundleID &&
+                   app.localizedName != "GhostClipboard" &&
+                   app.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+                    self.lastExternalApplication = app
+                }
             }
         }
 
-        expirationTimer?.invalidate()
-        expirationTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        let willSleepObs = wsCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.runRetentionCycle()
+                self?.handleSystemWillSleep()
+            }
+        }
+
+        let screensSleepObs = wsCenter.addObserver(
+            forName: NSWorkspace.screensDidSleepNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.handleSystemWillSleep()
+            }
+        }
+
+        let didWakeObs = wsCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.handleSystemDidWake()
+            }
+        }
+
+        let screensWakeObs = wsCenter.addObserver(
+            forName: NSWorkspace.screensDidWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.handleSystemDidWake()
+            }
+        }
+
+        workspaceObservers = [activateObs, willSleepObs, screensSleepObs, didWakeObs, screensWakeObs]
+
+        let appActiveObs = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                self.isBackgroundCoalesced = false
+                if self.isMonitoringRequested && !self.isSleepingOrScreenLocked {
+                    self.configurePasteboardDispatchTimer(interval: self.currentPollInterval, leewayMs: 150)
+                }
+            }
+        }
+
+        let appResignObs = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                self.isBackgroundCoalesced = true
+                if self.isMonitoringRequested && !self.isSleepingOrScreenLocked {
+                    self.configurePasteboardDispatchTimer(interval: max(self.currentPollInterval, 0.55), leewayMs: 400)
+                }
+            }
+        }
+
+        appObservers = [appActiveObs, appResignObs]
+    }
+
+    public func handleSystemWillSleep() {
+        isSleepingOrScreenLocked = true
+        pasteboardTimer?.cancel()
+        pasteboardTimer = nil
+        dbMaintenanceTimer?.cancel()
+        dbMaintenanceTimer = nil
+    }
+
+    public func handleSystemDidWake() {
+        isSleepingOrScreenLocked = false
+        runRetentionCycle()
+        if isMonitoringRequested {
+            let leeway = isBackgroundCoalesced ? 400 : 150
+            configurePasteboardDispatchTimer(interval: currentPollInterval, leewayMs: leeway)
+            configureLowFrequencyDBMaintenanceTimer()
+        }
+    }
+
+    private func setupMemoryPressureHandling() {
+        let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
+        source.setEventHandler { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.trimMemoryAndCachesNow()
+            }
+        }
+        source.resume()
+        self.memoryPressureSource = source
+    }
+
+    public func trimMemoryAndCachesNow() {
+        BoundedContentCache.shared.evictAll()
+        onMemoryPressureTrim?()
+        storage.releaseMemory()
+        if persistentClips.count > 50 {
+            persistentClips = Array(persistentClips.prefix(50))
+        }
+        lastStatusBanner = "Trimmed caches & released idle SQLite memory"
+    }
+
+    public func runtimeEfficiencySnapshot() -> RuntimeEfficiencySnapshot {
+        let stats = storage.fetchStorageStats()
+        let regexStats = RegexCache.shared.stats
+        let classStats = BoundedContentCache.shared.stats
+        return RuntimeEfficiencySnapshot(
+            residentMemoryBytes: RuntimeMemoryMonitor.currentResidentMemoryBytes(),
+            databaseSizeBytes: stats.databaseSizeBytes,
+            isEphemeralTimerActive: isEphemeralTimerActive,
+            ephemeralClipCount: ephemeralClips.count,
+            isPasteboardPollingPaused: preferences.monitoringPaused || isSleepingOrScreenLocked || pasteboardTimer == nil,
+            isBackgroundCoalesced: isBackgroundCoalesced,
+            regexCacheHits: regexStats.hits,
+            regexCacheMisses: regexStats.misses,
+            cachedRegexCount: regexStats.count,
+            classificationCacheHits: classStats.hits
+        )
+    }
+
+    // MARK: - Monitoring & Zero-Idle-Wake Timer Lifecycle
+
+    public func startMonitoring(pollInterval: TimeInterval = 0.45) {
+        currentPollInterval = pollInterval
+        isMonitoringRequested = true
+        lastChangeCount = NSPasteboard.general.changeCount
+
+        configurePasteboardDispatchTimer(interval: pollInterval, leewayMs: isBackgroundCoalesced ? 400 : 150)
+        configureLowFrequencyDBMaintenanceTimer()
+        updateEphemeralTimerLifecycle()
+    }
+
+    public func stopMonitoring() {
+        isMonitoringRequested = false
+        pasteboardTimer?.cancel()
+        pasteboardTimer = nil
+        ephemeralCountdownTimer?.cancel()
+        ephemeralCountdownTimer = nil
+        dbMaintenanceTimer?.cancel()
+        dbMaintenanceTimer = nil
+    }
+
+    private func configurePasteboardDispatchTimer(interval: TimeInterval, leewayMs: Int) {
+        pasteboardTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(
+            deadline: .now() + interval,
+            repeating: interval,
+            leeway: .milliseconds(leewayMs)
+        )
+        timer.setEventHandler { [weak self] in
+            self?.checkPasteboardIfNeeded()
+        }
+        timer.resume()
+        pasteboardTimer = timer
+    }
+
+    private func configureLowFrequencyDBMaintenanceTimer() {
+        dbMaintenanceTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        // Low-frequency 10-minute timer with 60s kernel coalescing leeway for 30-day DB retention checks
+        timer.schedule(
+            deadline: .now() + 600,
+            repeating: 600,
+            leeway: .seconds(60)
+        )
+        timer.setEventHandler { [weak self] in
+            self?.runRetentionCycle()
+        }
+        timer.resume()
+        dbMaintenanceTimer = timer
+    }
+
+    /// Starts the 1.0s countdown timer ONLY when `ephemeralClips` is non-empty,
+    /// and immediately cancels it the instant `ephemeralClips` becomes empty!
+    private func updateEphemeralTimerLifecycle() {
+        if ephemeralClips.isEmpty {
+            if ephemeralCountdownTimer != nil {
+                ephemeralCountdownTimer?.cancel()
+                ephemeralCountdownTimer = nil
+            }
+        } else {
+            if ephemeralCountdownTimer == nil {
+                let timer = DispatchSource.makeTimerSource(queue: .main)
+                timer.schedule(deadline: .now() + 1.0, repeating: 1.0, leeway: .milliseconds(100))
+                timer.setEventHandler { [weak self] in
+                    self?.tickEphemeralCountdown()
+                }
+                timer.resume()
+                ephemeralCountdownTimer = timer
             }
         }
     }
 
-    public func stopMonitoring() {
-        pasteboardTimer?.invalidate()
-        pasteboardTimer = nil
-        expirationTimer?.invalidate()
-        expirationTimer = nil
+    private func tickEphemeralCountdown(now: Date = Date()) {
+        guard !ephemeralClips.isEmpty else {
+            updateEphemeralTimerLifecycle()
+            return
+        }
+        ephemeralClips.removeAll { $0.isExpired(at: now) }
     }
 
     // MARK: - Pasteboard Inspection (Section 4.1 Steps 1-4)
 
     public func checkPasteboardIfNeeded() {
+        // Ultra-fast changeCount check with zero allocations when idle
         let pb = NSPasteboard.general
         let currentCount = pb.changeCount
-        guard !preferences.monitoringPaused else {
-            lastChangeCount = currentCount
-            return
-        }
         guard currentCount != lastChangeCount else { return }
         lastChangeCount = currentCount
+
+        guard !preferences.monitoringPaused else { return }
 
         // Ignore self-initiated clipboard writes
         if let internalCount = internalWriteChangeCount, internalCount == currentCount {
@@ -367,8 +634,9 @@ public final class ClipboardCoordinator: ObservableObject {
                 detectionReasons: securityEval.detectionReasons
             )
 
-            ephemeralClips.removeAll { $0.contentHash == hash }
-            ephemeralClips.insert(ephemeralItem, at: 0)
+            var updated = ephemeralClips.filter { $0.contentHash != hash }
+            updated.insert(ephemeralItem, at: 0)
+            ephemeralClips = updated
             lastStatusBanner = "Ephemeral item captured (auto-expires in \(Int(expDuration))s)"
             return .memoryOnlyEphemeral
         }
@@ -469,7 +737,7 @@ public final class ClipboardCoordinator: ObservableObject {
         )) ?? []
     }
 
-    // MARK: - User Actions (Copy, Paste, Pin, Delete, Clear)
+    // MARK: - User Actions (Copy, Direct Paste, UUID Generator, Paste Stack, Pin, Delete, Clear)
 
     public func copyToSystemClipboard(_ text: String, markClipID: UUID? = nil) {
         let pb = NSPasteboard.general
@@ -483,6 +751,57 @@ public final class ClipboardCoordinator: ObservableObject {
             reloadClips()
         }
         lastStatusBanner = "Copied to clipboard"
+    }
+
+    /// Copies the clip, dismisses the Floating Palette, reactivates the previous external app,
+    /// and if `directPasteToActiveApp && AXIsProcessTrusted()` is true, synthesizes `⌘V` after 40ms.
+    public func copyAndPasteFromPalette(
+        _ text: String,
+        markClipID: UUID? = nil,
+        onDismiss: () -> Void
+    ) {
+        copyToSystemClipboard(text, markClipID: markClipID)
+        let targetApp = lastExternalApplication
+        let shouldDirectPaste = preferences.directPasteToActiveApp
+        onDismiss()
+
+        AccessibilityPasteHelper.reactivateAndPasteIfNeeded(
+            previousApp: targetApp,
+            directPasteEnabled: shouldDirectPaste
+        ) { [weak self] pasted in
+            if pasted {
+                Task { @MainActor [weak self] in
+                    self?.lastStatusBanner = "Copied & pasted into \(targetApp?.localizedName ?? "active app")"
+                }
+            }
+        }
+    }
+
+    @discardableResult
+    public func generateAndCopyUUID() -> String {
+        let uuid = UUID().uuidString.lowercased()
+        copyToSystemClipboard(uuid)
+        _ = ingestClipboardContent(
+            uuid,
+            metadata: PasteboardMetadata(sourceAppName: "GhostClipboard UUID Generator")
+        )
+        lastStatusBanner = "Generated & copied UUID v4: \(uuid)"
+        return uuid
+    }
+
+    @discardableResult
+    public func copyMergedClips(pinnedOnly: Bool = false, limit: Int = 5, separator: String = "\n\n") -> String {
+        let candidates = pinnedOnly
+            ? persistentClips.filter { $0.isPinned }
+            : Array(persistentClips.prefix(max(1, limit)))
+        guard !candidates.isEmpty else {
+            lastStatusBanner = pinnedOnly ? "No pinned clips to merge" : "No clips available to merge"
+            return ""
+        }
+        let merged = candidates.map(\.content).joined(separator: separator)
+        copyToSystemClipboard(merged)
+        lastStatusBanner = "Merged & copied \(candidates.count) \(pinnedOnly ? "pinned" : "recent") clips"
+        return merged
     }
 
     public func clearSystemClipboard() {
@@ -540,6 +859,8 @@ public final class ClipboardCoordinator: ObservableObject {
 
     public func clearAllHistory(keepPinned: Bool = false) {
         ephemeralClips.removeAll()
+        BoundedContentCache.shared.evictAll()
+        onMemoryPressureTrim?()
         try? storage.clearAllHistory(keepPinned: keepPinned)
         reloadAllData()
         lastStatusBanner = keepPinned ? "Cleared unpinned history" : "All clipboard history & logs purged"

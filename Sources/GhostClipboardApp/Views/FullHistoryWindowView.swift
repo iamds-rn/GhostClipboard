@@ -44,6 +44,7 @@ public enum ClipSortOrder: String, CaseIterable, Identifiable {
 public struct FullHistoryWindowView: View {
     @ObservedObject public var coordinator: ClipboardCoordinator
     public var onOpenSettings: () -> Void
+    public var onTogglePalette: (() -> Void)?
 
     @Environment(\.colorScheme) private var scheme
 
@@ -54,9 +55,14 @@ public struct FullHistoryWindowView: View {
     @State private var manualSnippetText: String = ""
     @State private var showAddSnippetPopover: Bool = false
 
-    public init(coordinator: ClipboardCoordinator, onOpenSettings: @escaping () -> Void) {
+    public init(
+        coordinator: ClipboardCoordinator,
+        onOpenSettings: @escaping () -> Void,
+        onTogglePalette: (() -> Void)? = nil
+    ) {
         self.coordinator = coordinator
         self.onOpenSettings = onOpenSettings
+        self.onTogglePalette = onTogglePalette
     }
 
     private var displayedClips: [ClipItem] {
@@ -169,6 +175,13 @@ public struct FullHistoryWindowView: View {
                         .foregroundColor(GhostTheme.textMuted(scheme))
                 }
                 Spacer()
+                Button {
+                    onTogglePalette?()
+                } label: {
+                    KeycapBadge(coordinator.preferences.hotkeyDisplayString)
+                }
+                .buttonStyle(.plain)
+                .help("Toggle Floating Palette (\(coordinator.preferences.hotkeyDisplayString))")
             }
             .padding(14)
 
@@ -371,11 +384,49 @@ public struct FullHistoryWindowView: View {
                 .background(GhostTheme.elevated(scheme))
                 .cornerRadius(6)
 
-                HStack {
+                HStack(spacing: 8) {
                     Text("\(clips.count) items")
                         .font(GhostTheme.metadataFont)
                         .foregroundColor(GhostTheme.textMuted(scheme))
+
                     Spacer()
+
+                    Button {
+                        _ = coordinator.generateAndCopyUUID()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "number.square")
+                                .font(.system(size: 11))
+                            Text("UUID v4")
+                                .font(GhostTheme.metadataFont)
+                        }
+                        .foregroundColor(GhostTheme.accent)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(GhostTheme.elevated(scheme))
+                        .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Generate a fresh UUID v4 and copy to clipboard")
+
+                    Menu {
+                        Button("Copy Merged Pinned Clips") {
+                            _ = coordinator.copyMergedClips(pinnedOnly: true)
+                        }
+                        Button("Copy Merged Top 5 Recent Clips") {
+                            _ = coordinator.copyMergedClips(pinnedOnly: false, limit: 5)
+                        }
+                        Button("Copy Merged Top 3 (Single-Line Space Separated)") {
+                            _ = coordinator.copyMergedClips(pinnedOnly: false, limit: 3, separator: " ")
+                        }
+                    } label: {
+                        Label("Stack", systemImage: "square.stack.3d.up")
+                            .font(GhostTheme.metadataFont)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("Paste Stack: Merge multiple pinned or recent clips")
+
                     Picker("Sort", selection: $sortOrder) {
                         ForEach(ClipSortOrder.allCases) { order in
                             Text(order.rawValue).tag(order)
@@ -383,7 +434,7 @@ public struct FullHistoryWindowView: View {
                     }
                     .pickerStyle(.menu)
                     .controlSize(.small)
-                    .frame(width: 140)
+                    .frame(width: 135)
                 }
             }
             .padding(12)

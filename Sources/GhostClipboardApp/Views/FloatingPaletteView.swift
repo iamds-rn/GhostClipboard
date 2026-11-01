@@ -33,6 +33,18 @@ public struct FloatingPaletteView: View {
 
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
+    private static let commandNumberKeyCodeToIndex: [UInt16: Int] = [
+        18: 0, // ⌘1
+        19: 1, // ⌘2
+        20: 2, // ⌘3
+        21: 3, // ⌘4
+        23: 4, // ⌘5
+        22: 5, // ⌘6
+        26: 6, // ⌘7
+        28: 7, // ⌘8
+        25: 8  // ⌘9
+    ]
+
     public init(
         coordinator: ClipboardCoordinator,
         onOpenFullHistory: @escaping () -> Void,
@@ -75,6 +87,10 @@ public struct FloatingPaletteView: View {
         return clips[selectedIndex]
     }
 
+    private var primaryReturnLabel: String {
+        coordinator.preferences.directPasteToActiveApp ? "Copy & Paste" : "Copy"
+    }
+
     public var body: some View {
         VStack(spacing: 0) {
             headerBar
@@ -98,6 +114,7 @@ public struct FloatingPaletteView: View {
         .cornerRadius(10)
         .preferredColorScheme(coordinator.preferences.resolvedColorScheme)
         .onAppear {
+            now = Date()
             isSearchFocused = true
             selectedIndex = 0
             installKeyMonitor()
@@ -113,7 +130,9 @@ public struct FloatingPaletteView: View {
             selectedIndex = 0
         }
         .onReceive(timer) { tick in
-            now = tick
+            if !coordinator.ephemeralClips.isEmpty {
+                now = tick
+            }
         }
         .sheet(isPresented: $showActionMenu) {
             if let clip = selectedClip {
@@ -129,6 +148,18 @@ public struct FloatingPaletteView: View {
                 return event
             }
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+            // Instant ⌘1 – ⌘9 quick-select shortcuts
+            if flags == .command, let targetIdx = Self.commandNumberKeyCodeToIndex[event.keyCode] {
+                guard !showActionMenu else { return event }
+                let clips = filteredClips
+                if targetIdx < clips.count {
+                    selectedIndex = targetIdx
+                    let clip = clips[targetIdx]
+                    coordinator.copyAndPasteFromPalette(clip.content, markClipID: clip.id, onDismiss: onDismiss)
+                    return nil
+                }
+            }
 
             switch event.keyCode {
             case 126: // Up Arrow
@@ -156,13 +187,10 @@ public struct FloatingPaletteView: View {
 
             case 36, 76: // Return or Keypad Enter
                 guard !showActionMenu, let clip = selectedClip else { return event }
-                if flags.contains(.command) {
-                    let plain = clip.content.trimmingCharacters(in: .whitespacesAndNewlines)
-                    coordinator.copyToSystemClipboard(plain, markClipID: clip.id)
-                } else {
-                    coordinator.copyToSystemClipboard(clip.content, markClipID: clip.id)
-                }
-                onDismiss()
+                let payload = flags.contains(.command)
+                    ? clip.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                    : clip.content
+                coordinator.copyAndPasteFromPalette(payload, markClipID: clip.id, onDismiss: onDismiss)
                 return nil
 
             case 40: // 'K' key
@@ -204,8 +232,7 @@ public struct FloatingPaletteView: View {
                 .focused($isSearchFocused)
                 .onSubmit {
                     if let clip = selectedClip {
-                        coordinator.copyToSystemClipboard(clip.content, markClipID: clip.id)
-                        onDismiss()
+                        coordinator.copyAndPasteFromPalette(clip.content, markClipID: clip.id, onDismiss: onDismiss)
                     }
                 }
 
@@ -219,6 +246,25 @@ public struct FloatingPaletteView: View {
                 }
                 .buttonStyle(.plain)
             }
+
+            // Quick Generate UUID v4 button
+            Button {
+                _ = coordinator.generateAndCopyUUID()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "number.square")
+                        .font(.system(size: 11))
+                    Text("UUID v4")
+                        .font(GhostTheme.metadataFont)
+                }
+                .foregroundColor(GhostTheme.accent)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 4)
+                .background(GhostTheme.elevated(scheme))
+                .cornerRadius(4)
+            }
+            .buttonStyle(.plain)
+            .help("Generate a fresh UUID v4 and copy to clipboard")
 
             // Monitoring status indicator
             Button {
@@ -284,15 +330,14 @@ public struct FloatingPaletteView: View {
                     ScrollView {
                         LazyVStack(spacing: 2) {
                             ForEach(Array(clips.enumerated()), id: \.element.id) { idx, clip in
-                                paletteRow(clip: clip, isSelected: idx == selectedIndex)
+                                paletteRow(clip: clip, index: idx, isSelected: idx == selectedIndex)
                                     .id(clip.id)
                                     .onTapGesture {
                                         selectedIndex = idx
                                     }
                                     .simultaneousGesture(
                                         TapGesture(count: 2).onEnded {
-                                            coordinator.copyToSystemClipboard(clip.content, markClipID: clip.id)
-                                            onDismiss()
+                                            coordinator.copyAndPasteFromPalette(clip.content, markClipID: clip.id, onDismiss: onDismiss)
                                         }
                                     )
                             }
@@ -307,7 +352,7 @@ public struct FloatingPaletteView: View {
                         }
                     }
                 }
-                .frame(width: 310)
+                .frame(width: 315)
 
                 Divider().overlay(GhostTheme.border(scheme))
 
@@ -320,7 +365,7 @@ public struct FloatingPaletteView: View {
         }
     }
 
-    private func paletteRow(clip: ClipItem, isSelected: Bool) -> some View {
+    private func paletteRow(clip: ClipItem, index: Int, isSelected: Bool) -> some View {
         HStack(spacing: 8) {
             // Color swatch or category icon
             if clip.primaryCategory == .hexColor, let col = clip.colorComponents {
@@ -336,10 +381,18 @@ public struct FloatingPaletteView: View {
             }
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(clip.isSensitiveOrEphemeral ? clip.maskedPreview : clip.contentPreview)
-                    .font(clip.primaryCategory == .code || clip.primaryCategory == .json || clip.primaryCategory == .terminalCommand ? GhostTheme.codeFont : GhostTheme.bodyFont)
-                    .foregroundColor(GhostTheme.textPrimary(scheme))
-                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(clip.isSensitiveOrEphemeral ? clip.maskedPreview : clip.contentPreview)
+                        .font(clip.primaryCategory == .code || clip.primaryCategory == .json || clip.primaryCategory == .terminalCommand ? GhostTheme.codeFont : GhostTheme.bodyFont)
+                        .foregroundColor(GhostTheme.textPrimary(scheme))
+                        .lineLimit(1)
+
+                    Spacer(minLength: 4)
+
+                    if index < 9 {
+                        KeycapBadge("⌘\(index + 1)")
+                    }
+                }
 
                 HStack(spacing: 6) {
                     CategoryBadgeView(
@@ -445,11 +498,10 @@ public struct FloatingPaletteView: View {
             // Quick primary action bar
             HStack(spacing: 8) {
                 Button {
-                    coordinator.copyToSystemClipboard(clip.content, markClipID: clip.id)
-                    onDismiss()
+                    coordinator.copyAndPasteFromPalette(clip.content, markClipID: clip.id, onDismiss: onDismiss)
                 } label: {
                     HStack(spacing: 4) {
-                        Text("Copy")
+                        Text(primaryReturnLabel)
                         KeycapBadge("↩")
                     }
                     .font(GhostTheme.metadataFont)
@@ -459,8 +511,7 @@ public struct FloatingPaletteView: View {
 
                 Button {
                     let plain = clip.content.trimmingCharacters(in: .whitespacesAndNewlines)
-                    coordinator.copyToSystemClipboard(plain, markClipID: clip.id)
-                    onDismiss()
+                    coordinator.copyAndPasteFromPalette(plain, markClipID: clip.id, onDismiss: onDismiss)
                 } label: {
                     HStack(spacing: 4) {
                         Text("Plain")
@@ -507,7 +558,7 @@ public struct FloatingPaletteView: View {
 
     private var footerBar: some View {
         let clips = filteredClips
-        return HStack(spacing: 12) {
+        return HStack(spacing: 10) {
             HStack(spacing: 4) {
                 Button {
                     if selectedIndex > 0 { selectedIndex -= 1 }
@@ -529,30 +580,20 @@ public struct FloatingPaletteView: View {
             HStack(spacing: 4) {
                 Button {
                     if let clip = selectedClip {
-                        coordinator.copyToSystemClipboard(clip.content, markClipID: clip.id)
-                        onDismiss()
+                        coordinator.copyAndPasteFromPalette(clip.content, markClipID: clip.id, onDismiss: onDismiss)
                     }
                 } label: { KeycapBadge("↩") }
                 .buttonStyle(.plain)
                 .keyboardShortcut(.return, modifiers: [])
 
-                Text("Copy")
+                Text(primaryReturnLabel)
                     .font(GhostTheme.metadataFont)
                     .foregroundColor(GhostTheme.textMuted(scheme))
             }
 
             HStack(spacing: 4) {
-                Button {
-                    if let clip = selectedClip {
-                        let plain = clip.content.trimmingCharacters(in: .whitespacesAndNewlines)
-                        coordinator.copyToSystemClipboard(plain, markClipID: clip.id)
-                        onDismiss()
-                    }
-                } label: { KeycapBadge("⌘↩") }
-                .buttonStyle(.plain)
-                .keyboardShortcut(.return, modifiers: [.command])
-
-                Text("Plain")
+                KeycapBadge("⌘1–9")
+                Text("Quick Pick")
                     .font(GhostTheme.metadataFont)
                     .foregroundColor(GhostTheme.textMuted(scheme))
             }
@@ -571,12 +612,13 @@ public struct FloatingPaletteView: View {
 
             Spacer()
 
-            // Privacy status & result count
+            // Active Global Hotkey & Privacy status
             HStack(spacing: 6) {
+                KeycapBadge(coordinator.preferences.hotkeyDisplayString)
                 Image(systemName: "lock.fill")
                     .font(.system(size: 10))
                     .foregroundColor(GhostTheme.success)
-                Text("Local AES-GCM • \(clips.count) items")
+                Text("Blind FTS • \(clips.count) items")
                     .font(GhostTheme.metadataFont)
                     .foregroundColor(GhostTheme.textSecondary(scheme))
             }
@@ -620,9 +662,10 @@ public struct FloatingPaletteView: View {
                     ForEach(actions, id: \.id) { action in
                         Button {
                             if let transformed = action.transformedContent {
-                                coordinator.copyToSystemClipboard(transformed, markClipID: clip.id)
-                                showActionMenu = false
-                                onDismiss()
+                                coordinator.copyAndPasteFromPalette(transformed, markClipID: clip.id) {
+                                    showActionMenu = false
+                                    onDismiss()
+                                }
                             }
                         } label: {
                             HStack {
@@ -653,7 +696,7 @@ public struct FloatingPaletteView: View {
                 .padding(12)
             }
         }
-        .frame(width: 460, height: 320)
+        .frame(width: 480, height: 340)
         .background(GhostTheme.background(scheme))
     }
 
