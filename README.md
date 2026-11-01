@@ -12,6 +12,56 @@
 
 ---
 
+## Download & Install
+
+**Requirements:** macOS 13 Ventura or later, on an Apple Silicon Mac (M1, M2, M3, M4 or newer).
+
+1. Download **`GhostClipboard-1.1.0.dmg`** from the [latest release](https://github.com/iamds-rn/GhostClipboard/releases/latest).
+2. Open the `.dmg` and drag **GhostClipboard** into the **Applications** folder.
+3. Eject the disk image, then open GhostClipboard from Applications, Spotlight, or Launchpad.
+4. Press **`⌥ Space`** anywhere to open the clipboard palette. You can change this shortcut in **Settings → General**.
+
+### "Apple could not verify GhostClipboard…"
+
+GhostClipboard is free and open source, but it isn't notarized by Apple yet (that requires a paid Apple Developer account). The first time you open it, macOS will block it. You only have to get past this once:
+
+1. Try to open GhostClipboard, then click **Done** on the warning.
+2. Open **System Settings → Privacy & Security**.
+3. Scroll down to the **Security** section and click **Open Anyway** next to GhostClipboard.
+4. Confirm with your password or Touch ID, then click **Open**.
+
+If you prefer Terminal, this does the same thing:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/GhostClipboard.app
+```
+
+You can check the download against the SHA-256 checksum published with each release:
+
+```bash
+shasum -a 256 ~/Downloads/GhostClipboard-1.1.0.dmg
+```
+
+### Optional permissions
+
+- **Direct Paste** (pasting straight into the app you were using, instead of just copying) needs **Accessibility** access. Turn it on in **Settings → General** and GhostClipboard will walk you through granting it. Everything else works without it.
+- **Launch at Login** can be turned on in **Settings → General**.
+
+### Updating
+
+Download the new `.dmg` and drag GhostClipboard into Applications again, choosing **Replace**. Your history and settings live in `~/.ghostclipboard/`, so they're kept between versions.
+
+### Uninstalling
+
+Quit GhostClipboard from its menu bar icon (**Quit GhostClipboard**), move it from Applications to the Trash, and, if you also want to erase your encrypted history, key, and login item:
+
+```bash
+rm -rf ~/.ghostclipboard
+rm -f ~/Library/LaunchAgents/com.ghostclipboard.macos.plist
+```
+
+---
+
 ## Why GhostClipboard?
 
 Most clipboard managers treat every `⌘C` identically, turning your local disk into a high-value target containing AWS keys, `.env` secrets, JWTs, and password manager copies.
@@ -97,7 +147,7 @@ This compiles both the native GUI executable (`.build/release/GhostClipboard`) a
 ```
 This script:
 1. Generates `Resources/AppIcon.icns` (if not already present).
-2. Builds the universal/release binaries (`GhostClipboard` and `ghostclipboard-cli`).
+2. Builds the release binaries (`GhostClipboard` and `ghostclipboard-cli`) for the host architecture (Apple Silicon).
 3. Assembles `dist/GhostClipboard.app` with `Info.plist`, `AppIcon.icns`, and embedded CLI binaries.
 4. Signs the bundle and CLI binaries with `Resources/GhostClipboard.entitlements` (using your `Developer ID Application` / `Apple Development` certificate if present, or ad-hoc signing automatically).
 
@@ -106,7 +156,14 @@ To launch the bundled app:
 open dist/GhostClipboard.app
 ```
 
-### 3. Run the 247-Assertion Verification Suite
+### 3. Build the Installer Disk Image (`.dmg`)
+```bash
+./scripts/make_dmg.sh            # packages the existing dist/GhostClipboard.app
+./scripts/make_dmg.sh --rebuild  # rebuilds the app first
+```
+This produces `dist/GhostClipboard-<version>.dmg` (drag-to-Applications layout plus a short "If macOS blocks the app" note) and a matching `.sha256` checksum file, ready to attach to a GitHub Release.
+
+### 4. Run the 247-Assertion Verification Suite
 GhostClipboard includes a comprehensive, self-contained verification runner covering secret detection, `AES-256-GCM` tamper resistance, zero-plaintext `HMAC-SHA256` blind FTS5 indexing, punctuation/camelCase queries, developer actions, and CLI gating:
 ```bash
 swift run GhostClipboardTests
@@ -157,6 +214,7 @@ GhostClipboard/
 └── scripts/
     ├── bundle_app.sh                    # One-step release bundler & codesign script
     ├── build_app_bundle.sh              # App bundle builder implementation
+    ├── make_dmg.sh                      # Drag-to-install .dmg packager for releases
     └── generate_app_icon.swift          # CoreGraphics procedural icon generator
 ```
 

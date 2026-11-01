@@ -1,0 +1,40 @@
+name: Release DMG
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release-dmg:
+    name: Build & Publish macOS .dmg Release
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run 247-assertion verification suite
+        run: swift run GhostClipboardTests
+
+      - name: Package signed GhostClipboard.app and build .dmg
+        run: |
+          ./scripts/bundle_app.sh
+          ./scripts/make_dmg.sh
+
+      - name: Publish GitHub Release with .dmg & SHA-256
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "GhostClipboard ${{ github.ref_name }}"
+          generate_release_notes: true
+          body: |
+            ### Download & Install (macOS 13+ Apple Silicon)
+            1. Download **`GhostClipboard-1.1.0.dmg`** below.
+            2. Open the `.dmg` and drag **GhostClipboard** into **Applications**.
+            3. On first launch, if macOS shows *"Apple could not verify GhostClipboard..."*, open **System Settings → Privacy & Security**, scroll down, and click **Open Anyway** (or run `xattr -dr com.apple.quarantine /Applications/GhostClipboard.app`).
+          files: |
+            dist/GhostClipboard-*.dmg
+            dist/GhostClipboard-*.dmg.sha256
