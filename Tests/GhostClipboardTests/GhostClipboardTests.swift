@@ -424,7 +424,9 @@ struct GhostClipboardTestRunner {
             assertEqual(GhostCLIRunner.shouldDispatchCLI(from: ["/Applications/GhostClipboard.app/Contents/MacOS/GhostClipboard"]), false)
             assertEqual(GhostCLIRunner.shouldDispatchCLI(from: ["/Applications/GhostClipboard.app/Contents/MacOS/GhostClipboard", "-psn_0_12345"]), false)
             assertEqual(GhostCLIRunner.shouldDispatchCLI(from: ["/Applications/GhostClipboard.app/Contents/MacOS/GhostClipboard", "-NSDocumentRevisionsDebugMode", "YES"]), false)
+            assertEqual(GhostCLIRunner.shouldDispatchCLI(from: ["/Applications/GhostClipboard.app/Contents/MacOS/GhostClipboard", "/Users/dev/custom_arg"]), false)
             assertEqual(GhostCLIRunner.shouldDispatchCLI(from: ["/Applications/GhostClipboard.app/Contents/MacOS/GhostClipboard", "status"]), true)
+            assertEqual(GhostCLIRunner.shouldDispatchCLI(from: ["/Applications/GhostClipboard.app/Contents/MacOS/ghostclipboard"]), true)
             assertEqual(GhostCLIRunner.shouldDispatchCLI(from: ["/Applications/GhostClipboard.app/Contents/MacOS/ghostclipboard", "--help"]), true)
             assertEqual(GhostCLIRunner.shouldDispatchCLI(from: ["/usr/local/bin/ghostclipboard-cli"]), true)
 
@@ -434,7 +436,9 @@ struct GhostClipboardTestRunner {
             assertEqual(GhostCLIRunner.run(arguments: ["status"], storage: regDB), 0)
             assertEqual(GhostCLIRunner.run(arguments: ["recent", "--limit", "3", "--json"], storage: regDB), 0)
             assertEqual(GhostCLIRunner.run(arguments: ["search", "docker", "--json"], storage: regDB), 0)
-            assertEqual(GhostCLIRunner.run(arguments: ["list", "--category", "code", "--json"], storage: regDB), 0)
+            assertEqual(GhostCLIRunner.run(arguments: ["search", "--limit", "1", "docker", "--json"], storage: regDB), 0)
+            assertEqual(GhostCLIRunner.run(arguments: ["search", "--limit", "1"], storage: regDB), 1, "search with only --limit 1 and no query must fail with exit code 1")
+            assertEqual(GhostCLIRunner.run(arguments: ["list", "--category", "code", "--limit", "2", "--json"], storage: regDB), 0)
             assertEqual(GhostCLIRunner.run(arguments: ["list", "--category", "invalid_cat"], storage: regDB), 1)
             assertEqual(GhostCLIRunner.run(arguments: ["unknown-cmd"], storage: regDB), 1)
         } catch {

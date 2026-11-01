@@ -1,22 +1,21 @@
 import Foundation
 
 public enum GhostCLIRunner {
+    public static let knownCLISubcommands: Set<String> = [
+        "status", "recent", "search", "list",
+        "enable-cli", "disable-cli",
+        "help", "--help", "-h",
+        "version", "--version", "-v"
+    ]
+
     public static func shouldDispatchCLI(from processArguments: [String]) -> Bool {
-        if let executableName = (processArguments.first as NSString?)?.lastPathComponent.lowercased(),
-           executableName == "ghostclipboard-cli" {
+        if let executableName = (processArguments.first as NSString?)?.lastPathComponent,
+           executableName.lowercased() == "ghostclipboard-cli" || executableName == "ghostclipboard" {
             return true
         }
         guard processArguments.count > 1 else { return false }
         let arg = processArguments[1]
-        let knownFlags: Set<String> = ["-h", "--help", "-v", "--version"]
-        if knownFlags.contains(arg) {
-            return true
-        }
-        // macOS LaunchServices / AppKit runtime flags start with "-" (e.g. -psn_..., -NSDocumentRevisionsDebugMode)
-        if arg.hasPrefix("-") {
-            return false
-        }
-        return true
+        return knownCLISubcommands.contains(arg)
     }
 
     public static func runAndExit(arguments: [String], storage: SQLiteStorageEngine? = nil) -> Never {
@@ -66,16 +65,26 @@ public enum GhostCLIRunner {
         case "enable-cli":
             var updated = prefs
             updated.enableCLIAccess = true
-            _ = try? resolvedStorage.savePreferences(updated)
-            print("CLI access enabled.")
-            return 0
+            do {
+                try resolvedStorage.savePreferences(updated)
+                print("CLI access enabled.")
+                return 0
+            } catch {
+                fputs("Failed to enable CLI access: \(error.localizedDescription)\n", stderr)
+                return 1
+            }
 
         case "disable-cli":
             var updated = prefs
             updated.enableCLIAccess = false
-            _ = try? resolvedStorage.savePreferences(updated)
-            print("CLI access disabled.")
-            return 0
+            do {
+                try resolvedStorage.savePreferences(updated)
+                print("CLI access disabled.")
+                return 0
+            } catch {
+                fputs("Failed to disable CLI access: \(error.localizedDescription)\n", stderr)
+                return 1
+            }
 
         case "recent":
             guard checkCLIGate(prefs) else { return 2 }
@@ -92,14 +101,15 @@ public enum GhostCLIRunner {
 
         case "search":
             guard checkCLIGate(prefs) else { return 2 }
-            let remaining = Array(arguments.dropFirst()).filter { !$0.hasPrefix("--") }
-            guard let query = remaining.first, !query.isEmpty else {
-                fputs("Usage: ghostclipboard search <query> [--json]\n", stderr)
+            let positionals = positionalArguments(in: Array(arguments.dropFirst()), optionsWithValues: ["--limit"])
+            guard let query = positionals.first, !query.isEmpty else {
+                fputs("Usage: ghostclipboard search <query> [--limit N] [--json]\n", stderr)
                 return 1
             }
+            let limit = parseIntOption(in: arguments, flag: "--limit") ?? 50
             let jsonOutput = arguments.contains("--json")
             do {
-                let clips = try resolvedStorage.fetchClips(query: query, limit: 50)
+                let clips = try resolvedStorage.fetchClips(query: query, limit: limit)
                 outputClips(clips, asJSON: jsonOutput)
                 return 0
             } catch {
@@ -125,9 +135,10 @@ public enum GhostCLIRunner {
                 fputs("Unknown category '\(categorySlug!)'. Valid categories: code, url, hex_color, markdown, json, terminal_command, plain_text\n", stderr)
                 return 1
             }
+            let limit = parseIntOption(in: arguments, flag: "--limit") ?? 100
             let jsonOutput = arguments.contains("--json")
             do {
-                let clips = try resolvedStorage.fetchClips(category: category, limit: 100)
+                let clips = try resolvedStorage.fetchClips(category: category, limit: limit)
                 outputClips(clips, asJSON: jsonOutput)
                 return 0
             } catch {
@@ -185,6 +196,25 @@ public enum GhostCLIRunner {
             print("[\(idx + 1)] [\(clip.primaryCategory.shortLabel)\(lang)]\(pin) \(rel)\(app)")
             print("    \(clip.contentPreview)")
         }
+    }
+
+    private static func positionalArguments(in args: [String], optionsWithValues: Set<String>) -> [String] {
+        var result: [String] = []
+        var i = 0
+        while i < args.count {
+            let token = args[i]
+            if optionsWithValues.contains(token) {
+                i += 2
+                continue
+            }
+            if token.hasPrefix("-") {
+                i += 1
+                continue
+            }
+            result.append(token)
+            i += 1
+        }
+        return result
     }
 
     private static func parseStringOption(in args: [String], flag: String) -> String? {
