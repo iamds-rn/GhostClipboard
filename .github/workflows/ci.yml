@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-bundle:
+    name: Build, Test (247 Assertions) & Package App (macOS 14)
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show Swift & macOS environment
+        run: |
+          sw_vers
+          swift --version
+
+      - name: Build release binaries
+        run: swift build -c release
+
+      - name: Run 247-assertion verification suite
+        run: swift run GhostClipboardTests
+
+      - name: Package & sign dist/GhostClipboard.app
+        run: ./scripts/bundle_app.sh
+
+      - name: Verify packaged app bundle & CLI binary
+        run: |
+          test -d dist/GhostClipboard.app
+          test -x dist/GhostClipboard.app/Contents/MacOS/GhostClipboard
+          test -x dist/GhostClipboard.app/Contents/MacOS/ghostclipboard-cli
+          test -f dist/GhostClipboard.app/Contents/Resources/AppIcon.icns
+          codesign --verify --deep --strict --verbose=2 dist/GhostClipboard.app
+          ./dist/ghostclipboard --version
+          ./dist/ghostclipboard status
